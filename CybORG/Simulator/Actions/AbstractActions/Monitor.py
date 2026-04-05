@@ -58,7 +58,7 @@ class Monitor(Action):
             for event in network_connections:
                 if event.pid:
                     session.add_sus_pids(hostname=child.hostname, pid=event.pid)
-                obs.add_process(hostid=child.hostname, **vars(event))
+                obs.add_process(hostid=child.hostname, **{s: getattr(event, s) for s in event.__slots__})
             host.events.old_network_connections = deepcopy(network_connections)
             network_connections.clear()
 

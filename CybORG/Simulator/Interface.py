@@ -6,7 +6,7 @@ from CybORG.Simulator.Entity import Entity
 
 class Interface(Entity):
     """Interface object for the Hosts.
-    
+
     Attributes
     ----------
     name : str
@@ -18,6 +18,8 @@ class Interface(Entity):
     blocked_ips : list
     swarm : bool
      """
+    __slots__ = ('name', 'interface_type', 'ip_address', 'subnet', 'data_links', 'max_range', 'blocked_ips', 'swarm')
+
     def __init__(self, name: str = None, ip_address: str = None, subnet: str = None, interface_type: str = 'wired', data_links: list = None, max_range: float = 100, swarm=False):
         """Initiates the Interface"""
         super().__init__()

@@ -10,6 +10,11 @@ from CybORG.Simulator.HostEvents import NetworkConnection
 
 
 class Process(Entity):
+    __slots__ = (
+        'name', 'pid', 'ppid', 'program', 'user', 'path', 'open_ports',
+        'decoy_type', 'connections', 'properties', 'process_type', 'version',
+    )
+
     def __init__(self, process_name: str, pid: int, username: str, parent_pid: int = None, program_name: str = None,
                  path: str = None, open_ports: list = None, process_type: str = None, process_version: str = None,
                  decoy_type: DecoyType = DecoyType.NONE, properties: List[str] = None):

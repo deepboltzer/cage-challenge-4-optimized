@@ -38,7 +38,13 @@ class RewardCalculator(CybORGLogger):
 
     def calculate_simulation_reward(self, env_controller):
         """Calculates the reward from the environment controller"""
-        current_state = env_controller._filter_obs(env_controller.get_true_state(env_controller.INFO_DICT['True'])).data
+        # Use the step-level cache on SimulationController (if available) so that
+        # State.get_true_state() runs only once per step across all reward calculators.
+        # Falls back to the original path for environments that don't expose the method.
+        if hasattr(env_controller, 'get_reward_current_state'):
+            current_state = env_controller.get_reward_current_state()
+        else:
+            current_state = env_controller._filter_obs(env_controller.get_true_state(env_controller.INFO_DICT['True'])).data
         action = env_controller.action
         agent_observations = env_controller.observation
         done = env_controller.done

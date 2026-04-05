@@ -11,11 +11,16 @@ class BaseWrapper:
         self.env = env
         self.agents = env.agents if env is not None else []
 
-    def step(self, agent=None, action=None, messages: dict=None) -> Results:
+    def step(self, agent=None, action=None, messages: dict=None):
         result = self.env.step(agent, action)
         result.observation = self.observation_change(agent, result.observation)
         result.action_space = self.action_space_change(result.action_space)
-        return result
+        # Return gymnasium-compatible 5-tuple: (obs, reward, terminated, truncated, info)
+        # Legacy callers that expect a Results object can use env.step() directly.
+        terminated = bool(result.done) if result.done is not None else False
+        truncated = False
+        info = {'action_space': result.action_space, 'action': result.action}
+        return result.observation, result.reward, terminated, truncated, info
 
     def reset(self, agent=None, seed = None):
         result = self.env.reset(agent, seed)

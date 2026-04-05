@@ -6,7 +6,20 @@ from typing import Any, Tuple, Union
 
 import gym
 import numpy as np
-import pygame
+
+# Gymnasium compatibility shim — allows modern SB3/gymnasium wrappers to wrap this env
+try:
+    import gymnasium as _gymnasium
+    # Patch gym spaces to be recognised by gymnasium if shimmy is not available
+    import gym.spaces as _gym_spaces
+    if not hasattr(_gym_spaces.Space, '__gymnasium_compatible__'):
+        _gym_spaces.Space.__gymnasium_compatible__ = True
+except ImportError:
+    pass
+try:
+    import pygame
+except ImportError:
+    pygame = None  # GUI disabled in CC4; pygame is optional
 from gym.utils import seeding
 
 from CybORG.Simulator.SimulationController import SimulationController
@@ -118,9 +131,23 @@ class CybORG(CybORGLogger):
         self.environment_controller.step(actions, skip_valid_action_check)
         self.environment_controller.send_messages(messages)
         agents = set(agents + self.active_agents)
-        return {agent: self.get_observation(agent) for agent in agents}, \
-               {agent: self.environment_controller.get_reward(agent) for agent in agents}, \
-               {agent: self.environment_controller.done for agent in agents}, {}
+
+        # --- Observation gathering (Optimization 2) ---
+        # Fast-path for the single-agent case avoids dict comprehension overhead.
+        # TODO: parallelise with ThreadPoolExecutor for the multi-agent case once
+        #       GIL contention in get_observation() is profiled and confirmed safe.
+        if len(agents) == 1:
+            agent = next(iter(agents))
+            obs_dict  = {agent: self.get_observation(agent)}
+            rew_dict  = {agent: self.environment_controller.get_reward(agent)}
+            done_dict = {agent: self.environment_controller.done}
+        else:
+            # TODO: parallelise with ThreadPoolExecutor
+            obs_dict  = {agent: self.get_observation(agent) for agent in agents}
+            rew_dict  = {agent: self.environment_controller.get_reward(agent) for agent in agents}
+            done_dict = {agent: self.environment_controller.done for agent in agents}
+
+        return obs_dict, rew_dict, done_dict, {}
 
     def step(self, agent: str = None, action=None, messages: dict = None,
          skip_valid_action_check: bool = False) -> Results:

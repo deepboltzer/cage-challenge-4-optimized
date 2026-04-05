@@ -3,7 +3,7 @@ from CybORG.Simulator.Entity import Entity
 
 class Service(Entity):
     """Class for services used in CybORG simulations
-    
+
     Attributes
     ----------
     process : int
@@ -11,6 +11,8 @@ class Service(Entity):
     session : Session
     percent_reliable : int
     """
+    __slots__ = ('process', 'active', 'session', '_percent_reliable')
+
     def __init__(self, process: int, active = True, session = None):
         super().__init__()
         self.process = process

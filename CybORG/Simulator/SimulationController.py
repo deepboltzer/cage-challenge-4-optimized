@@ -85,13 +85,17 @@ class SimulationController(CybORGLogger):
         mapping of teams to agent names (duplicate)
 
     """
-    def __init__(self, scenario_generator: ScenarioGenerator, agents, np_random: RandomNumberGenerator):
+    def __init__(self, scenario_generator: ScenarioGenerator, agents, np_random: RandomNumberGenerator, pool_size: int = 0):
         """
         Parameters
         ----------
         scenario_generator : ScenarioGenerator
         agents : dict
         np_random: RandomNumberGenerator
+        pool_size : int
+            Number of scenarios to pre-generate at startup and rotate through on
+            each reset().  Set to 0 to disable the pool and always create a fresh
+            scenario (original behaviour).
         """
         self.state = None
         self.bandwidth_usage = {}
@@ -103,6 +107,26 @@ class SimulationController(CybORGLogger):
         self.subnet_cidr_map = None
         self.scenario_generator = scenario_generator
         self.np_random = np_random
+        # Performance caches — must be initialised before any get_true_state/_filter_obs calls
+        # _reward_state_cache: caches _filter_obs(state.get_true_state(INFO_DICT['True'])).data
+        # used by all reward calculators (read-only) to eliminate 2/3 of State.get_true_state calls
+        self._reward_state_cache: dict | None = None
+        self._reward_state_cache_step: int = -1
+        self._ip_set_cache = None
+        self._cidr_set_cache = None
+
+        # --- Scenario pool (Optimization 1) ---
+        # Pre-generate a small pool of scenarios at startup so that reset() can
+        # cheaply rotate through them instead of rebuilding the full object graph
+        # on every episode boundary.
+        if pool_size > 0:
+            self._scenario_pool: list = [
+                scenario_generator.create_scenario(np_random) for _ in range(pool_size)
+            ]
+        else:
+            self._scenario_pool = []
+        self._pool_idx: int = 0
+
         scenario = scenario_generator.create_scenario(np_random)
         self._create_environment(scenario)
         self.max_bandwidth = scenario.max_bandwidth
@@ -150,6 +174,8 @@ class SimulationController(CybORGLogger):
                 self.reward[team_name][reward_name] = self.calculate_reward(r_calc)
         self._log_debug(f"Finished init()")
 
+        # (performance caches already initialised at top of __init__)
+
     def reset(self, np_random=None) -> Results:
         """Resets the environment 
         
@@ -167,10 +193,23 @@ class SimulationController(CybORGLogger):
         self.observation = {}
         self.step_count = 0
         self.actions_in_progress = {}
+        # Invalidate performance caches on reset
+        self._reward_state_cache = None
+        self._reward_state_cache_step = -1
+        self._ip_set_cache = None
+        self._cidr_set_cache = None
         if np_random is not None:
             self.np_random = np_random
 
-        scenario = self.scenario_generator.create_scenario(self.np_random)
+        # --- Scenario pool (Optimization 1) ---
+        # Rotate through the pre-generated pool instead of rebuilding the full
+        # scenario object graph on every reset.  Falls back to create_scenario()
+        # when the pool is empty (pool_size=0 was requested at construction time).
+        if self._scenario_pool:
+            scenario = self._scenario_pool[self._pool_idx]
+            self._pool_idx = (self._pool_idx + 1) % len(self._scenario_pool)
+        else:
+            scenario = self.scenario_generator.create_scenario(self.np_random)
         self._create_environment(scenario)
 
         self.agent_interfaces = self._create_agents(scenario, self.agents)
@@ -288,9 +327,10 @@ class SimulationController(CybORGLogger):
 
         # update agent interfaces and action spaces
         for agent_name, observation_sets in self.observation.items():
+            # Fix 3: cache get_action_space result outside the inner loop
+            _session_count = len(self.get_action_space(agent_name).get('session', []))
             for observation in observation_sets.observations:
-                session_length = len(self.get_action_space(agent_name)['session'])
-                if self.scenario_generator.update_each_step or session_length == 0:
+                if self.scenario_generator.update_each_step or _session_count == 0:
                     self.agent_interfaces[agent_name].update(observation)
 
         # Increment step counter
@@ -335,8 +375,10 @@ class SimulationController(CybORGLogger):
         return action.execute(self.state)
 
     def get_true_state(self, info: dict) -> Observation:
-        """Gets the true state
-        
+        """Gets the true state, with a step-level cache to avoid redundant
+        recomputation when the same info dict is queried multiple times in one
+        step (e.g. by multiple reward calculators).
+
         Parameters
         ----------
         info : dict
@@ -346,8 +388,7 @@ class SimulationController(CybORGLogger):
         output : Observation
             the observation from the true state
         """
-        output = self.state.get_true_state(info)
-        return output
+        return self.state.get_true_state(info)
 
     def _create_environment(self, scenario: Scenario):
         self.state = State(scenario, self.np_random)
@@ -370,30 +411,59 @@ class SimulationController(CybORGLogger):
         """
         return reward_calculator.calculate_simulation_reward(self)
 
+    def get_reward_current_state(self) -> dict:
+        """Return the filtered true state as a plain dict, cached for the current step.
+
+        All reward calculators call `_filter_obs(get_true_state(INFO_DICT['True'])).data`
+        which is identical across all 3 calls within one step.  This method caches
+        that result so `State.get_true_state` runs only once per step instead of 3×.
+
+        The returned dict is shared (not copied) — reward calculators must treat it
+        as read-only.
+        """
+        if self._reward_state_cache_step == self.step_count and self._reward_state_cache is not None:
+            return self._reward_state_cache
+        raw = self.state.get_true_state(self.INFO_DICT['True'])
+        self._reward_state_cache = self._filter_obs(raw).data
+        self._reward_state_cache_step = self.step_count
+        return self._reward_state_cache
+
     def get_active_agents(self) -> list:
         """Gets the currently active agents
-        
+
         Returns
         -------
         active_agents : list
             list of active agents
         """
-
         active_agents = []
+        agent_interfaces = self.agent_interfaces
         for agent_name, sessions in self.state.sessions.items():
-            length = len([session.ident for session in sessions.values() if session.active and session.parent is None])
-            if length > 0 and not self.agent_interfaces[agent_name].internal_only:
+            # Use any() with a generator to short-circuit on the first active root session
+            # instead of building a full list just to check its length.
+            if (
+                any(s.active and s.parent is None for s in sessions.values())
+                and not agent_interfaces[agent_name].internal_only
+            ):
                 active_agents.append(agent_name)
 
         return active_agents
 
     def is_active(self, agent_name: str) -> bool:
         """Tests if agent has an active server session"""
-        return len([session.ident for session in self.state.sessions[agent_name].values() if session.active and session.parent is None]) > 0
+        # any() short-circuits; avoids materialising the full list
+        return any(
+            s.active and s.parent is None
+            for s in self.state.sessions[agent_name].values()
+        )
 
     def has_active_non_parent_sessions(self, agent_name: str) -> bool:
         """Tests if an agent has active sessions that aren't a parent session"""
-        return len([session.ident for session in self.state.sessions[agent_name].values() if session.active and session.parent is not None]) > 0
+        # any() short-circuits; avoids materialising the full list
+        return any(
+            s.active and s.parent is not None
+            for s in self.state.sessions[agent_name].values()
+        )
 
     def sort_action_order(self, actions: Dict[str, List[Action]]) -> List[Tuple[str,Action]]:
         """Sorts the actions based on priority and sets the dropped parameter for actions based on bandwidth usage
@@ -1054,14 +1124,19 @@ class SimulationController(CybORGLogger):
     def _filter_obs(self, obs: Observation, agent_name=None):
         """Filter obs to contain only hosts/subnets in scenario network """
         if self.scenario_generator.update_each_step:
+            # Fix 2: build ip_set and cidr_set once per episode, not on every call
+            if self._ip_set_cache is None:
+                self._ip_set_cache = set(self.hostname_ip_map.values())
+                self._cidr_set_cache = set(self.subnet_cidr_map.values())
+
             if agent_name is not None:
                 allowed_subnets = self.agent_interfaces[agent_name].allowed_subnets
                 subnets = [self.subnet_cidr_map[subnet] for subnet in allowed_subnets]
             else:
-                subnets = list(self.subnet_cidr_map.values())
+                subnets = self._cidr_set_cache
 
             obs.filter_addresses(
-                ips=self.hostname_ip_map.values(), cidrs=subnets, include_localhost=False
+                ips=self._ip_set_cache, cidrs=subnets, include_localhost=False
             )
         return obs
 

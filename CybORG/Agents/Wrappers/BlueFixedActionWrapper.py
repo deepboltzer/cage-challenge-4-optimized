@@ -48,8 +48,8 @@ class BlueFixedActionWrapper(BaseWrapper):
         ----------
         env : CybORG
             An instance of CybORG. Must not modify action_space.
-        pad_spaces : bool 
-            Ensure all observation and action spaces are the same size across all agents by padding the space with the Sleep action. 
+        pad_spaces : bool
+            Ensure all observation and action spaces are the same size across all agents by padding the space with the Sleep action.
             This is a requirement for some RL libraries.
         *args, **kwargs
             Extra arguments are ignored.
@@ -67,8 +67,17 @@ class BlueFixedActionWrapper(BaseWrapper):
         self._agent_metadata = {}
         self._action_space = {}
 
+        # Cache for static (episode-invariant) parts of the action space
+        self._static_actions = {}
+        self._static_labels = {}
+        # Per-slot metadata used to cheaply rebuild the dynamic action/mask on reset.
+        # Each entry is a tuple: ('host', hostname, action_obj) or ('static', action_obj)
+        # where 'host' slots need mask re-evaluation each reset.
+        self._static_slot_info = {}
+
         for agent in self.agents:
             self._create_hardcoded_metadata(agent)
+            self._build_static_action_list(agent)
             self._populate_action_space(agent)
         self._host_sanity_check()
         self._apply_padding()
@@ -230,76 +239,125 @@ class BlueFixedActionWrapper(BaseWrapper):
             "subnets": sorted(subnets),
         }
 
-    def _populate_action_space(self, agent_name: str) -> None:
-        """Construct an agent's action space in a consistent order with labels and mask."""
+    def _build_static_action_list(self, agent_name: str) -> None:
+        """Build the full sorted action list and labels exactly once at init.
+
+        Results are stored in ``self._static_actions[agent_name]``,
+        ``self._static_labels[agent_name]``, and
+        ``self._static_slot_info[agent_name]``.
+
+        ``_static_slot_info`` records, for every slot, whether the slot is
+        *fixed* (always valid, mask always True) or *host-based* (validity
+        must be re-evaluated each reset).  Each entry is one of:
+
+        * ``('static', action_obj)``   – mask is always True
+        * ``('host', hostname, command_class, action_params)``
+                                        – mask depends on whether the host has
+                                          an active session this episode
+        """
         state = self.env.environment_controller.state
 
-        # This assumes that the commands will never change.
-        commands = self.env.get_action_space(agent_name)["action"]
-        commands = sorted(list(commands), key=str)
+        # Sort command classes once here; cached result is reused every reset.
+        commands = sorted(list(self.env.get_action_space(agent_name)["action"]), key=str)
 
-        # Default parameters for all actions except Sleep.
         action_params = {"session": 0, "agent": agent_name}
 
-        # This assumes that the existence of each subnet never changes.
         sorted_subnet_name_to_cidr = sorted(state.subnet_name_to_cidr.items())
 
-        # Check if an agent has a session on a host. Host must exist.
-        has_session = lambda h: 0 < len(state.hosts[h].sessions.get(agent_name, []))
-
-        # Action space variables to populate. Order is important!
-        actions = []
-        labels = []
-        mask = []
+        static_actions = []
+        static_labels = []
+        slot_info = []
 
         for command in commands:
             command_name = command.__name__
 
             if command_name == "Sleep":
-                actions.append(command())
-                labels.append("Sleep")
-                mask.append(True)
+                obj = command()
+                static_actions.append(obj)
+                static_labels.append("Sleep")
+                slot_info.append(("static", obj, "Sleep"))
                 continue
 
             if command_name == "Monitor":
-                actions.append(command(**action_params))
-                labels.append("Monitor")
-                mask.append(True)
+                obj = command(**action_params)
+                static_actions.append(obj)
+                static_labels.append("Monitor")
+                slot_info.append(("static", obj, "Monitor"))
                 continue
 
             if command_name in ("AllowTrafficZone", "BlockTrafficZone"):
                 for dstname in self._agent_metadata[agent_name]["subnets"]:
                     dst = state.subnet_name_to_cidr[dstname]
-
                     for srcname, src in sorted_subnet_name_to_cidr:
                         srcname = srcname.lower()
                         if src == dst:
                             continue
-                        actions.append(
-                            command(from_subnet=srcname, to_subnet=dstname, **action_params)
-                        )
-                        labels.append(
-                            f"{command_name} {dstname} ({dst}) <- {srcname} ({src})"
-                        )
-                        mask.append(True)
+                        obj = command(from_subnet=srcname, to_subnet=dstname, **action_params)
+                        label = f"{command_name} {dstname} ({dst}) <- {srcname} ({src})"
+                        static_actions.append(obj)
+                        static_labels.append(label)
+                        slot_info.append(("static", obj, label))
                 continue
 
             # All other (host-based) commands.
             for hostname in self._agent_metadata[agent_name]["hosts"]:
-                # Actions are disabled for router hosts.
                 if "router" in hostname:
                     continue
+                # Store both the real action object and both label variants so
+                # _populate_action_space can switch cheaply without string ops.
+                obj = command(hostname=hostname, **action_params)
+                valid_label = f"{command_name} {hostname}"
+                invalid_label = f"[Invalid] {command_name} {hostname}"
+                static_actions.append(obj)
+                static_labels.append(valid_label)
+                slot_info.append(("host", hostname, obj, valid_label, invalid_label))
 
-                # If the target host does not currently exist, use a no-op action.
-                if hostname not in state.hosts or not has_session(hostname):
-                    actions.append(Sleep())
-                    labels.append(f"[Invalid] {command_name} {hostname}")
-                    mask.append(False)
-                    continue
+        self._static_actions[agent_name] = static_actions
+        self._static_labels[agent_name] = static_labels
+        self._static_slot_info[agent_name] = slot_info
 
-                actions.append(command(hostname=hostname, **action_params))
-                labels.append(f"{command_name} {hostname}")
+    def _populate_action_space(self, agent_name: str) -> None:
+        """Construct an agent's action space in a consistent order with labels and mask.
+
+        On the first call (from ``__init__``), ``_build_static_action_list``
+        has already built the full sorted list and labels.  Here we only need
+        to evaluate the per-episode host validity to produce the dynamic
+        ``actions`` list (Sleep substitution), ``labels`` (with [Invalid]
+        prefix for inactive hosts), and ``mask``.
+
+        On subsequent calls (from ``reset``), the sorted command list and all
+        subnet/zone action objects are reused from the static cache, so only
+        the host-based slots are re-evaluated.
+        """
+        state = self.env.environment_controller.state
+
+        # Check if an agent has a session on a host. Host must exist.
+        has_session = lambda h: 0 < len(state.hosts[h].sessions.get(agent_name, []))
+
+        slot_info = self._static_slot_info[agent_name]
+
+        actions = []
+        labels = []
+        mask = []
+        _sleep = Sleep()
+
+        for slot in slot_info:
+            if slot[0] == "static":
+                # slot == ('static', action_obj, label)
+                actions.append(slot[1])
+                labels.append(slot[2])
                 mask.append(True)
+            else:
+                # slot == ('host', hostname, prebuilt_action_obj, valid_label, invalid_label)
+                hostname = slot[1]
+                if hostname not in state.hosts or not has_session(hostname):
+                    actions.append(_sleep)
+                    labels.append(slot[4])  # invalid_label
+                    mask.append(False)
+                else:
+                    actions.append(slot[2])
+                    labels.append(slot[3])  # valid_label
+                    mask.append(True)
 
         self._max_act_space_size = max(self._max_act_space_size, len(actions))
         self._action_space[agent_name] = {

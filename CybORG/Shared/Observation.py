@@ -112,11 +112,14 @@ class Observation:
             pid = int(pid)
             if pid < 0:
                 raise ValueError
-            for old_process in self.data[hostid]["Processes"]:
-                if old_process.get("PID", None) == pid:
-                    new_process = old_process
-                    self.data[hostid]["Processes"].remove(old_process)
-                    break
+            processes = self.data[hostid]["Processes"]
+            new_process = next(
+                (p for p in processes if p.get("PID", None) == pid), {}
+            )
+            if new_process:
+                self.data[hostid]["Processes"] = [
+                    p for p in processes if p is not new_process
+                ]
             new_process["PID"] = pid
 
         if parent_pid is not None:
@@ -808,33 +811,28 @@ class Observation:
             elif not isinstance(obs_v, dict):
                 continue
 
-            filter_procs = []
-            for i, proc in enumerate(obs_v.get("Processes", [])):
-                for conn in proc.get("Connections", []):
-                    for proc_k in ["local_address", "remote_address"]:
-                        if proc_k in conn and conn[proc_k] not in ip_set and i not in filter_procs:
-                            filter_procs.append(i)
+            if "Processes" in obs_v:
+                obs_v["Processes"] = [
+                    proc for proc in obs_v["Processes"]
+                    if not any(
+                        proc_k in conn and conn[proc_k] not in ip_set
+                        for conn in proc.get("Connections", [])
+                        for proc_k in ["local_address", "remote_address"]
+                    )
+                ]
+                if len(obs_v["Processes"]) == 0:
+                    del obs_v["Processes"]
 
-            # Must remove indices in reverse order, else risk incorrect proc
-            # being removed
-            for p_idx in sorted(filter_procs, reverse=True):
-                del obs_v["Processes"][p_idx]
-
-            if "Processes" in obs_v and len(obs_v["Processes"]) == 0:
-                del obs_v["Processes"]
-
-            filter_interfaces = []
-            for i, interface in enumerate(obs_v.get("Interface", [])):
-                check_ip = "IP Address" in interface and interface["IP Address"] not in ip_set
-                check_subnet = "Subnet" in interface and interface["Subnet"] not in cidr_set and i not in filter_interfaces
-                if check_ip or check_subnet:
-                    filter_interfaces.append(i)
-
-            for i_idx in sorted(filter_interfaces, reverse=True):
-                del obs_v["Interface"][i_idx]
-
-            if "Interface" in obs_v and len(obs_v["Interface"]) == 0:
-                del obs_v["Interface"]
+            if "Interface" in obs_v:
+                obs_v["Interface"] = [
+                    interface for interface in obs_v["Interface"]
+                    if not (
+                        ("IP Address" in interface and interface["IP Address"] not in ip_set)
+                        or ("Subnet" in interface and interface["Subnet"] not in cidr_set)
+                    )
+                ]
+                if len(obs_v["Interface"]) == 0:
+                    del obs_v["Interface"]
 
             if len(list(obs_v.values())) == 0:
                 filter_hosts.append(obs_k)

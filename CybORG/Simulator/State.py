@@ -170,57 +170,68 @@ class State(CybORGLogger):
         true_obs = Observation()
         if info is None:
             raise ValueError('None is not a valid argument for the get true state function in the State class')
-        for hostname, host in self.hosts.items():
-            if hostname not in info:
+        # Cache session map once to avoid repeated attribute lookups in the inner loop
+        all_sessions = self.sessions
+        for hostname in info:
+            if hostname not in self.hosts:
                 continue
-            if 'Processes' in info[hostname]:
+            host = self.hosts[hostname]
+            # Cache per-host info dict to avoid repeated hash lookups on the outer dict
+            host_info = info[hostname]
+            if 'Processes' in host_info:
                 for process in host.processes:
                     obs = process.get_state()
                     for o in obs:
                         true_obs.add_process(hostid=hostname, **o)
-            if 'Interfaces' in info[hostname]:
-                if info[hostname]['Interfaces'] == 'All':
+            if 'Interfaces' in host_info:
+                interfaces_val = host_info['Interfaces']
+                if interfaces_val == 'All':
                     for interface in host.interfaces:
                         true_obs.add_interface_info(hostid=hostname, **interface.get_state())
-                elif info[hostname]['Interfaces'] == 'ip_address':
+                elif interfaces_val == 'ip_address':
                     for interface in host.interfaces:
                         if interface.name != 'lo':
                             true_obs.add_interface_info(hostid=hostname, ip_address=interface.ip_address)
                 else:
-                    raise NotImplementedError(f"{info[hostname]['Interfaces']} cannot be collected from state")
-            if 'Sessions' in info[hostname]:
-                if info[hostname]['Sessions'] == 'All':
+                    raise NotImplementedError(f"{interfaces_val} cannot be collected from state")
+            if 'Sessions' in host_info:
+                sessions_val = host_info['Sessions']
+                if sessions_val == 'All':
                     for agent_name, sessions in host.sessions.items():
+                        agent_sessions = all_sessions[agent_name]
                         for session in sessions:
                             true_obs.add_session_info(
-                                hostid=hostname, **self.sessions[agent_name][session].get_state()
+                                hostid=hostname, **agent_sessions[session].get_state()
                             )
                 else:
-                    agent_name = info[hostname]['Sessions']
+                    agent_name = sessions_val
                     if agent_name in host.sessions:
+                        agent_sessions = all_sessions[agent_name]
                         for session in host.sessions[agent_name]:
                             true_obs.add_session_info(
-                                hostid=hostname, **self.sessions[agent_name][session].get_state()
+                                hostid=hostname, **agent_sessions[session].get_state()
                             )
-            if 'Files' in info[hostname]:
+            if 'Files' in host_info:
                 for file in host.files:
                     true_obs.add_file_info(hostid=hostname, **file.get_state())
-            if 'User info' in info[hostname]:
+            if 'User info' in host_info:
                 for user in host.users:
                     obs = user.get_state()
                     for o in obs:
                         true_obs.add_user_info(hostid=hostname, **o)
-            if 'System info' in info[hostname]:
+            if 'System info' in host_info:
                 true_obs.add_system_info(hostid=hostname, **host.get_state())
 
-            if 'Services' in info[hostname]:
-                if 'All' in info[hostname]['Services']:
+            if 'Services' in host_info:
+                services_val = host_info['Services']
+                if 'All' in services_val:
                     for service, service_info in host.services.items():
                         true_obs.add_process(hostid=hostname, service_name=service, pid=service_info.process)
                 else:
-                    for service_name in info[hostname]['Services']:
-                        if service_name in host.services:
-                            true_obs.add_process(hostid=hostname, service_name=service_name, pid=host.services[service_name].process)
+                    host_services = host.services
+                    for service_name in services_val:
+                        if service_name in host_services:
+                            true_obs.add_process(hostid=hostname, service_name=service_name, pid=host_services[service_name].process)
         return true_obs
 
     def _setup_data_links(self):
@@ -274,7 +285,16 @@ class State(CybORGLogger):
 
         Intended for use with DroneSwarmScenarioGenerator. Drones which are too far apart will have their data links dropped. Drones that come into range will establish datalinks.
         """
-        if any([any([j.interface_type == 'wireless' for j in i.interfaces]) for i in self.hosts.values()]):
+        # Cache the hosts dict values once to avoid repeated dict-view creation
+        hosts_values = self.hosts.values()
+        # Fast short-circuit: only enter the O(n^2) distance loop when at least
+        # one wireless interface is present.  Use a generator so we stop as soon
+        # as the first wireless interface is found instead of scanning every host.
+        if any(
+            j.interface_type == 'wireless'
+            for i in hosts_values
+            for j in i.interfaces
+        ):
             distances = {hostname: {hostname: 0.} for hostname in self.hosts.keys()}
             for hostname, host_info in self.hosts.items():
                 for hostname2, host_info2 in self.hosts.items():
@@ -438,7 +458,8 @@ class State(CybORGLogger):
         """
         for agent, sessions in self.sessions.items():
             for session_index, session in sessions.items():
-                if session.pid == pid and session.hostname == hostname:
+                # Check hostname first: cheaper string equality before integer pid check
+                if session.hostname == hostname and session.pid == pid:
                     return agent, session_index
         return None, None
 

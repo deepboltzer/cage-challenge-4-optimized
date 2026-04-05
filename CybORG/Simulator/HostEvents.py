@@ -5,8 +5,8 @@ from CybORG.Shared.Enums import TransportProtocol
 
 
 class HostEvents():
-    """Object that holds 'events'/alerts that have happened on a specific host. 
-    
+    """Object that holds 'events'/alerts that have happened on a specific host.
+
     Attributes
     ----------
     network_connections : List[NetworkConnection]
@@ -19,6 +19,8 @@ class HostEvents():
         past process creation alerts
 
     """
+    __slots__ = ('network_connections', 'old_network_connections', 'process_creation', 'old_process_creation')
+
     def __init__(self):
         self.network_connections: List[NetworkConnection] = []
         self.old_network_connections: List[NetworkConnection] = []
@@ -27,7 +29,7 @@ class HostEvents():
 
 class NetworkConnection():
     """Object that holds a network connection event/alert.
-    
+
     Attributes
     ----------
     local_address : IPv4Address
@@ -38,6 +40,11 @@ class NetworkConnection():
     application_protocol : str
     transport_protocol : TransportProtocol
     """
+    __slots__ = (
+        'local_address', 'local_port', 'remote_address', 'remote_port',
+        'pid', 'application_protocol', 'transport_protocol',
+    )
+
     def __init__(
         self,
         local_address: IPv4Address,

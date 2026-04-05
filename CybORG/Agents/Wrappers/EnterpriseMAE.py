@@ -4,7 +4,11 @@ from typing import Any
 import numpy as np
 
 from CybORG.Agents.Wrappers import BlueEnterpriseWrapper
-from ray.rllib.env.multi_agent_env import MultiAgentEnv
+try:
+    from ray.rllib.env.multi_agent_env import MultiAgentEnv
+except ImportError:
+    class MultiAgentEnv:  # stub — ray not installed
+        pass
 
 
 class EnterpriseMAE(BlueEnterpriseWrapper, MultiAgentEnv):

@@ -57,6 +57,11 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
         self._short_obs_space, self._long_obs_space = self._get_init_obs_spaces()
         self.comms_policies = self._build_comms_policy()
         self.policy = {}
+        self._cached_sorted_subnets = None
+        self._cached_comms_matrices = {}
+        self._cached_subnet_hosts = {}
+        self._cached_subnet_name_list = None
+        self._cached_subnet_name_to_idx = {}
 
     def reset(self, *args, **kwargs) -> tuple[dict[str, Any], dict[str, Any]]:
         """Reset the environment and update the observation space.
@@ -72,6 +77,16 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
         """
         observations, info = super().reset(*args, **kwargs)
         self.comms_policies = self._build_comms_policy()
+        state = self.env.environment_controller.state
+        self._cached_sorted_subnets = sorted(state.subnet_name_to_cidr.items())
+        self._cached_subnet_hosts = {
+            sn: [h for h in state.hosts if sn in h and "router" not in h]
+            for sn, _ in self._cached_sorted_subnets
+        }
+        self._cached_comms_matrices = {}
+        _names, _cidrs = zip(*self._cached_sorted_subnets)
+        self._cached_subnet_name_list = [n.lower() for n in _names]
+        self._cached_subnet_name_to_idx = {n: i for i, n in enumerate(self._cached_subnet_name_list)}
         observations = {
             a: self.observation_change(a, observations[a]) for a in self.agents
         }
@@ -192,9 +207,8 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
         proto_observation.append(mission_phase)
 
         # Useful (sorted) information
-        sorted_subnet_name_to_cidr = sorted(state.subnet_name_to_cidr.items())
-        subnet_names, subnet_cidrs = zip(*sorted_subnet_name_to_cidr)
-        subnet_names = [name.lower() for name in subnet_names]
+        sorted_subnet_name_to_cidr = self._cached_sorted_subnets if self._cached_sorted_subnets is not None else sorted(state.subnet_name_to_cidr.items())
+        subnet_names = self._cached_subnet_name_list if self._cached_subnet_name_list is not None else [n.lower() for n, _ in sorted_subnet_name_to_cidr]
         hosts = self.hosts(agent_name)
 
         for subnet in self.subnets(agent_name):
@@ -207,23 +221,27 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
 
             # Comms
             comms_policy = self.comms_policies[state.mission_phase]
-            comms_matrix = nx.to_numpy_array(comms_policy, nodelist=subnet_names)
-            comms_policy_subvector = comms_matrix[subnet_names.index(subnet)]
+            phase = int(state.mission_phase)
+            if phase not in self._cached_comms_matrices:
+                self._cached_comms_matrices[phase] = nx.to_numpy_array(comms_policy, nodelist=subnet_names)
+            comms_matrix = self._cached_comms_matrices[phase]
+            subnet_idx = self._cached_subnet_name_to_idx.get(subnet, subnet_names.index(subnet))
+            comms_policy_subvector = comms_matrix[subnet_idx]
             comms_policy_subvector = np.logical_not(comms_policy_subvector)
             self.policy[agent_name] = comms_policy
 
             # Process malware events for users, then servers
-            subnet_hosts = [h for h in hosts if subnet in h and "router" not in h]
+            subnet_hosts = self._cached_subnet_hosts.get(subnet, [h for h in hosts if subnet in h and "router" not in h])
 
-            process_subvector = [
-                h in state.hosts and 0 < len(self._get_procesess(state, h))
-                for h in subnet_hosts
-            ]
-
-            connection_subvector = [
-                h in state.hosts and 0 < len(self._get_connections(state, h))
-                for h in subnet_hosts
-            ]
+            process_subvector = []
+            connection_subvector = []
+            for h in subnet_hosts:
+                if h in state.hosts:
+                    process_subvector.append(0 < len(self._get_procesess(state, h)))
+                    connection_subvector.append(0 < len(self._get_connections(state, h)))
+                else:
+                    process_subvector.append(False)
+                    connection_subvector.append(False)
 
             proto_observation.extend(
                 itertools.chain(
