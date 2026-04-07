@@ -259,8 +259,9 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
 
         # Messages from other agents
         # This assumes CybORG provides a consistent ordering.
-        messages = observation.get("message", [EMPTY_MESSAGE] * NUM_MESSAGES)
-        assert len(messages) == NUM_MESSAGES
+        # Pad to NUM_MESSAGES with empty messages when fewer arrive (e.g. isolated subnets).
+        messages_raw = list(observation.get("message", []))
+        messages = (messages_raw + [EMPTY_MESSAGE] * NUM_MESSAGES)[:NUM_MESSAGES]
 
         message_subvector = np.concatenate(messages)
         assert len(message_subvector) == NUM_MESSAGES * MESSAGE_LENGTH
@@ -354,9 +355,9 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
                     buf[cursor + n_hosts + i] = False
             cursor += 2 * n_hosts
 
-        # Messages from other agents
-        messages = observation.get("message", [EMPTY_MESSAGE] * NUM_MESSAGES)
-        assert len(messages) == NUM_MESSAGES
+        # Messages from other agents (pad to NUM_MESSAGES when fewer arrive)
+        messages_raw = list(observation.get("message", []))
+        messages = (messages_raw + [EMPTY_MESSAGE] * NUM_MESSAGES)[:NUM_MESSAGES]
         message_subvector = np.concatenate(messages)
         assert len(message_subvector) == NUM_MESSAGES * MESSAGE_LENGTH
         msg_len = len(message_subvector)

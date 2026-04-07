@@ -297,7 +297,7 @@ class FiniteStateRedAgent(BaseAgent):
         """The selection of a valid host and action to execute this step."""
         chosen_host = self._choose_host(host_options)
         if chosen_host == None:
-            return Sleep()
+            return None, Sleep()
 
         host_action_options = {self.action_list[i]: prob for i, prob in enumerate(self.state_transitions_probability[self.host_states[chosen_host]['state']]) if not prob == None}
 

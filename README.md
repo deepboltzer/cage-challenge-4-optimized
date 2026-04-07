@@ -86,10 +86,7 @@ wall-clock time.
 **Conservative combined estimate on the Ray path: 10–20x faster experiment throughput
 versus the unmodified competition baseline.**
 
-See `/docs/optimization_master_plan.md` for the full item-by-item breakdown with file
-paths, line numbers, and behavior-safety rationale. Detailed analysis by subsystem is in
-`/docs/analysis_obs_pipeline.md`, `/docs/analysis_simloop.md`, and
-`/docs/analysis_training_harness.md`.
+See `/docs/speed_report.md` for benchmark timing results.
 
 ---
 
@@ -113,6 +110,15 @@ Two bugs that could crash the simulation:
 2. Line 315 called `self._choose_action(...)` — a method that does not exist. The
    correct method name is `self._choose_host_and_action(...)`. This caused an
    `AttributeError` whenever that branch was reached. Fix: corrected the typo.
+
+3. Line 300 returned `Sleep()` (a single value) when no valid host could be selected,
+   but the caller at line 115 unpacks the result as `chosen_host, action = ...`. This
+   `TypeError` was latent (only triggers when all discovered hosts are in the `F`/Failed
+   state simultaneously). Fix: changed `return Sleep()` to `return None, Sleep()`.
+
+**Note:** The scenario generator uses `SleepAgent` for red by default. Evaluations must
+explicitly pass `red_agent_class=FiniteStateRedAgent` to `EnterpriseScenarioGenerator`
+to exercise these fixes.
 
 ### [Critical] PhishingEmail — firewall bypass documented as architectural design
 **File:** `CybORG/Simulator/Actions/ConcreteActions/PhishingEmail.py`
@@ -142,17 +148,19 @@ routable. Fix: replaced `np_random.choice()` + `list.remove()` (which also raise
 `red_agents.pop(idx)` using a random integer index — the element is always removed
 after one probe, guaranteeing termination.
 
-### [Medium] Remove — misleading comment about file removal
-**File:** `CybORG/Simulator/Actions/AbstractActions/Remove.py` (lines 70–71)
+### [Medium] Remove — file removal not implemented
+**File:** `CybORG/Simulator/Actions/AbstractActions/Remove.py` (lines 70–77)
 
-The `Remove` action only kills suspicious processes (via `StopProcess`). It does **not**
-remove malware files dropped by `ExploitRemoteService` or `PrivilegeEscalate`. A
-misleading comment implied otherwise. Fix: replaced the comment with an accurate note
-explaining that file removal requires `Restore` (full host reimage).
+The `Remove` action had a comment stating "remove suspicious files" but contained no
+code to do so — only `StopProcess` calls. Malware files dropped by
+`ExploitRemoteService` (`cmd.exe`/`cmd.sh`) and `PrivilegeEscalate`
+(`escalate.exe`/`escalate.sh`) were left on disk. Fix: implemented file removal by
+filtering `host.files` to exclude entries with `density >= 0.9 and not signed`.
 
-**Implication for blue agents:** After `Remove`, malware files (e.g. `cmd.exe`,
-`escalate.sh`) remain on disk. If `Restore` is not subsequently issued, a future
-`PrivilegeEscalate` can re-exploit the dropped file immediately.
+**Implication for blue agents:** After `Remove`, malware files are now cleared.
+Root sessions (created by `PrivilegeEscalate`) survive `Remove` and require `Restore`
+to evict. A `malfile` flag with no `conn`/`proc` events is the `PrivilegeEscalate`
+signature and should trigger `Restore` rather than `Remove`.
 
 ### [Medium] Host.restore() — event lists wiped, pending detections lost
 **File:** `CybORG/Simulator/Host.py` (lines 340–343)
@@ -261,19 +269,17 @@ mean step time 12.37 ms. This is measured with full agent decision overhead incl
 raw environment throughput is higher. See `/docs/speed_report.md` for latest numbers
 including Wave 3 results when available.
 
-**Known agent reward baselines** (100 episodes, 500 steps each, `FiniteStateRedAgent`):
+**Known agent reward baselines** (500 steps each, `FiniteStateRedAgent`, official `evaluation.py` format — mean per-agent reward per step × 500):
 
 | Agent | Mean Reward | Std Dev | Notes |
 |---|---|---|---|
-| SleepAgent (baseline) | -31,882 | — | Takes no action every step |
-| EnterpriseHeuristicAgent v4 | -5,025 | 1,570 | 84.2% improvement over SleepAgent |
-| EnterpriseHeuristicAgent v5 | -5,402 | — | Comms-policy blocking + streak filtering |
-| EnterpriseHeuristicAgent v6 | -1,990 | — | +BlueFlatWrapperV2 malfile flags; 63% over v5 |
+| SleepAgent (baseline) | -6,488 | 1,391 | Takes no action every step (100 eps, seed=42) |
+| **EnterpriseHeuristicAgent v7** | **-221** | **102** | **Multi-decoy + decoy-hit detection (100 eps, seed=42)** |
 
-The v6 result uses `BlueFlatWrapperV2` (see [Observation vector](#observation-vector))
-which appends per-host malicious-file flags derived from `host.files`. This enables
-detection of the 5% silent exploit case and all `PrivilegeEscalate` drops with 0% false
-positive rate. See `/docs/` for strategy notes.
+v7 achieves **96.6% improvement over SleepAgent** (-221 vs -6,488). Measured with the
+official `evaluation.py` protocol (mean per-agent reward; earlier tables used sum across
+5 agents which gives ×5 larger magnitudes). See [Agent Performance](#agent-performance)
+for the full strategy breakdown.
 
 ---
 
@@ -341,29 +347,102 @@ python CybORG/Evaluation/evaluation.py \
 ## Agent Performance
 
 The table below lists known agent results on the standard evaluation protocol
-(100 episodes, 500 steps, `FiniteStateRedAgent`). Add your own results by running
-`evaluation.py` and recording `reward_mean` and `reward_stdev` from `summary.json`.
+(100 episodes, 500 steps, `FiniteStateRedAgent`, seed=42). Rewards are in the
+**official `evaluation.py` format**: mean per-agent reward per step × 500 steps.
+Add your own results by running `evaluation.py` and recording `reward_mean` and
+`reward_stdev` from `summary.json`.
 
-| Rank | Agent | Mean Reward | Std Dev | Wrapper |
-|---|---|---|---|---|
-| — | SleepAgent | -31,882 | — | BlueFlatWrapper |
-| 3 | EnterpriseHeuristicAgent v4 | -5,025 | 1,570 | BlueFlatWrapper |
-| 4 | EnterpriseHeuristicAgent v5 | -5,402 | — | BlueFlatWrapper |
-| 1 | EnterpriseHeuristicAgent v6 | -1,990 | — | BlueFlatWrapperV2 |
+| Rank | Agent | Mean Reward | Std Dev | Wrapper | Episodes |
+|---|---|---|---|---|---|
+| — | SleepAgent | -6,488 | 1,391 | BlueFlatWrapper | 100×500 |
+| 2 | EnterpriseHeuristicAgent v7 | -221 | 102 | BlueFlatWrapperV2 | 100×500 |
+| 1 | **EnterpriseHeuristicAgent v9** | **-214** | **74** | BlueFlatWrapperV2 | **100×500** |
 
-Strategy notes for the v6 heuristic agent:
+v9 improves on v7: -214 vs -221 mean reward, and a significantly tighter std dev (74 vs 102).
+Both achieve ~96.7% improvement over SleepAgent (-214 vs -6,488). The lower std dev indicates
+more consistent defense — the inter-agent messaging reduces variance by allowing upstream peers
+to escalate Restore decisions before damage compounds.
 
-- **Malfile-first Restore (Priority 1b):** If `BlueFlatWrapperV2` malfile flags are
-  present, Restore the host immediately. Malfile flags have 0% FP rate (file density
-  ≥ 0.9, unsigned) and catch both the 5% silent exploit case and all PrivilegeEscalate
-  drops — cases that never appear in process or connection event flags.
-- **Connection-event Restore (Priority 1a):** Restore immediately on confirmed network
-  connection alerts without waiting for a streak (connection events have near-zero FP
-  rate from green activity).
-- **Communications policy blocking (Priority 3):** Blocks inbound subnets where the
-  mission phase policy indicates isolation, reducing red lateral movement.
-- **Process-event Remove (Priority 4):** Issues `Remove` on process-flag alerts (may
-  have green FP from local work); escalates to `Restore` if flag persists.
+v9 adds fully functional inter-agent messaging (v8 sent messages but all receivers
+ignored them). See [Inter-Agent Messaging Protocol v9](#inter-agent-messaging-protocol-v9)
+below and `/docs/v9_messaging_protocol.md` for the full specification.
+
+Strategy notes for the v9 heuristic agent:
+
+- **Multi-decoy saturation (Priority 7):** Deploy `MAX_DECOYS=3` decoy services per
+  host across ALL hosts (OTService targets first, then servers, then user hosts).
+  With 3 decoys alongside 1 legitimate service, **75% of red's blind exploit attempts
+  fail** — red wastes 4 steps per failed attempt and gains no session.
+- **Decoy-hit detection (Priority 1b):** Using `BlueFlatWrapperV2` malfile flags,
+  `conn_flag=1 AND malfile=0 AND proc_flag=0` = decoy hit (no real session). If a
+  decoy is deployed on that host, skip the 5-step Restore (save resources). Only
+  Restore when no decoy is present (unknown source). Skip is suppressed when the
+  upstream peer reports `DECOYS_BYPASSED` (red has PID knowledge).
+- **Confirmed-red Restore (Priority 1):** Restore immediately when `conn_flag=1` AND
+  `malfile=1` or `proc_flag=1` — the malfile confirms a real session was created.
+- **PrivilegeEscalate detection (Priority 1c):** `malfile=1` with no events = root
+  session from PrivilegeEscalate. Restore only (Remove cannot evict root sessions).
+- **Decoy redeploy after Restore (Priority 6):** Restore wipes all decoys (host
+  reimaged). Re-arm immediately in the same priority order.
+- **Communications policy blocking (Priority 3):** Blocks inbound subnets per mission
+  phase, reducing red lateral movement over IP.
+- **Process-event Remove (Priority 4):** Issues `Remove` on process-flag alerts;
+  escalates to `Restore` based on 3-tier peer message escalation (see below).
+- **3-tier peer escalation (Priority 4):** Uses incoming `upstream_red_count`,
+  `upstream_threat`, and `upstream_decoys_bypassed` to dynamically adjust the
+  Remove-to-Restore escalation threshold (0/1/2 steps).
+
+---
+
+## Inter-Agent Messaging Protocol v9
+
+CC4 provides a 32-bit channel per step: each blue agent broadcasts 8 bits; each
+receives 4 peer messages (ordered by agent index, excluding self) in its observation
+vector at `obs[base : base+32]`.
+
+**v8 sent messages but all receivers ignored them.** v9 fixes this end-to-end:
+
+1. **`evaluate_heuristic.py`** now captures the message return from `get_action()` and
+   passes `messages=` to `env.step()` (previously discarded).
+2. **`BlueFlatWrapper`** pads the message array when isolated agents reduce the count
+   below 4 (prevents assertion crash in Phase 1/2 when OZA/OZB become isolated).
+3. **`_read_peer_messages()`** now decodes all 8 bits and returns 8 actionable fields.
+
+### Bit layout (zero redundancy, 100% utilisation)
+
+```
+Bit  7   6   5   4   3   2   1   0
+     R   D   C1  C0  P1  P0  T1  T0
+```
+
+| Bits | Field | Encoding |
+|------|-------|----------|
+| 0–1 | `THREAT_LEVEL` | 0=clean, 1=decoy_hit, 2=user_session, 3=root_session |
+| 2–3 | `OPEN_PATHS` | Count of unblocked required comms paths, saturates at 3 |
+| 4–5 | `RED_HOST_COUNT` | Count of hosts with confirmed red presence, saturates at 3 |
+| 6 | `DECOYS_BYPASSED` | Red has PID knowledge of sender's decoys |
+| 7 | `RESTORING` | At least one Restore in progress in sender's zone |
+
+### How receivers act on incoming messages
+
+**Priority 1b (decoy-hit skip):** When a conn-only event hits a host with a decoy,
+Restore is normally skipped (likely a decoy hit). The skip is suppressed if the
+upstream peer's `DECOYS_BYPASSED` bit is set — red may be targeting real services
+using PID intelligence gathered in the adjacent zone.
+
+**Priority 4 (Remove→Restore escalation):**
+
+| Tier | Peer condition | Threshold |
+|------|----------------|-----------|
+| T3 | `upstream_red_count >= 3` | 0 — Restore on first proc_flag |
+| T2 | `any_root` or `upstream_threat >= 2` | 1 — Restore if flag age ≥ 1 |
+| T2 compound | `upstream_threat >= 1` AND `open_paths > 0` AND `decoys_bypassed` | 1 |
+| Default | none | 2 — normal Remove-first flow |
+
+**Upstream mapping:** `_UPSTREAM = {(1,1): 0, (2,3): 2}` — in Phase 1 agent_0 (RZA)
+is upstream of agent_1 (OZA); in Phase 2 agent_2 (RZB) is upstream of agent_3 (OZB).
+
+Full specification: `/docs/v9_messaging_protocol.md`
 
 ---
 
@@ -445,7 +524,7 @@ A `malfile_flag` is `1.0` if any file on that host has `density >= 0.9` and
 no accompanying process/connection events is therefore the `PrivilegeEscalate`
 signature (root session, no events) and should trigger `Restore` directly.
 
-Use `BlueFlatWrapperV2` when evaluating `EnterpriseHeuristicAgent v6`:
+Use `BlueFlatWrapperV2` when evaluating `EnterpriseHeuristicAgent v9` (or v6+):
 
 ```python
 from CybORG.Agents.Wrappers import BlueFlatWrapperV2
@@ -523,10 +602,7 @@ Bug reports and pull requests are welcome. Please include before/after timing fr
 
 | Document | Contents |
 |---|---|
-| `/docs/optimization_master_plan.md` | Full item-by-item optimization breakdown |
-| `/docs/analysis_obs_pipeline.md` | Observation pipeline analysis |
-| `/docs/analysis_simloop.md` | Simulation loop analysis |
-| `/docs/analysis_training_harness.md` | Training harness analysis |
-| `/docs/speed_report.md` | Benchmark timing results |
-| `/docs/simulation_audit_report.md` | 3-agent expert audit: 7 bugs, 4 inconsistencies, 4 design gaps |
+| `/docs/speed_report.md` | Benchmark timing results (Wave 1–3) |
+| `/docs/simulation_audit_report.md` | Simulation bug audit: 10 fixes applied (2026-04-07) |
 | `/docs/attack_chain_analysis.md` | Red agent attack chain analysis with FSM state tables |
+| `/docs/v9_messaging_protocol.md` | Inter-agent messaging protocol v9 specification |
