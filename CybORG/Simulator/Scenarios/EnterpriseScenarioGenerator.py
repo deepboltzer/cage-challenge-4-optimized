@@ -761,7 +761,7 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
                 agent_type = None
                 default_actions = (Sleep, {})
                 if self.green_agent_class:
-                    if self.green_agent_class == EnterpriseGreenAgent:
+                    if issubclass(self.green_agent_class, EnterpriseGreenAgent):
                         host_ip = hosts[hostname].interfaces[0].ip_address
                         agent_type = self.green_agent_class(name=agent_name, np_random=self.np_random, own_ip=host_ip)
                     elif self.green_agent_class == SleepAgent:

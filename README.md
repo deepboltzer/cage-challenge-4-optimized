@@ -525,4 +525,5 @@ python scripts/evaluate_heuristic.py --episodes 100 --steps 500 --seed 42
 | `/docs/v9_messaging_protocol.md` | Full inter-agent messaging v9 specification |
 | `/docs/simulation_audit_report.md` | 10 bug fixes: analysis and rationale |
 | `/docs/attack_chain_analysis.md` | Red agent FSM state tables and attack chains |
+| `/docs/red_agent_phishing_spread.md` | Detailed phishing entry mechanics and FSM transitions |
 | `/docs/speed_report.md` | Benchmark timing results (Waves 1–3) |

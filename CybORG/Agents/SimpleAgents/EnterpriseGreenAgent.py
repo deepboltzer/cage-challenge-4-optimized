@@ -83,3 +83,19 @@ class EnterpriseGreenAgent(BaseAgent):
     def set_initial_values(self, action_space: ActionSpace, observation: Observation):
         pass
 
+
+class ZeroNoiseGreenAgent(EnterpriseGreenAgent):
+    """EnterpriseGreenAgent variant with phishing and false-positive rates forced to 0%.
+
+    Drop-in replacement for use in clean-environment evaluations where you want to
+    isolate heuristic performance from green-agent noise.
+    """
+    def __init__(self, name: str, own_ip: IPv4Address, np_random=None, **kwargs):
+        super().__init__(
+            name=name,
+            own_ip=own_ip,
+            np_random=np_random,
+            fp_detection_rate=0.0,
+            phishing_error_rate=0.0,
+        )
+

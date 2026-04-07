@@ -1,4 +1,4 @@
-"""Optimal heuristic blue agents for CAGE Challenge 4 -- v9.
+"""Optimal heuristic blue agents for CAGE Challenge 4 -- v9.1.
 
 v9.1 fixes:
   - Clear _remove_at on Restore (host reimaged, Remove history stale)
@@ -147,6 +147,7 @@ RESTORE_DUR = 5
 # Red must either spend 2 steps on DiscoverDeception (50% miss) or waste 4 steps.
 MAX_DECOYS = 3
 
+
 # -- Messaging constants ------------------------------------------------------
 
 # Bits per single agent message (= MESSAGE_LENGTH in BlueFixedActionWrapper)
@@ -168,6 +169,10 @@ _AGENT_PRIMARY_SUBNET = {
 # Phase-aware upstream agent: in phase P, agent U is "upstream" of agent D
 # meaning red must compromise U's subnet before reaching D's subnet.
 # Key = (phase, downstream_agent_idx) → upstream_agent_idx
+# v10: Added Phase 0 mappings. Red enters via contractor, pivots through RZ
+# to OZ. In Phase 0 all subnets are connected, so RZ agents are upstream of
+# OZ agents. This enables T3 escalation when a peer zone is saturated,
+# addressing the 58% Phase 0 loss gap (FM-12).
 _UPSTREAM = {
     (1, 1): 0,   # Phase 1: RZA (agent_0) is upstream of OZA (agent_1)
     (2, 3): 2,   # Phase 2: RZB (agent_2) is upstream of OZB (agent_3)
@@ -407,7 +412,7 @@ class EnterpriseHeuristicAgent:
 
         # -- Priority 1: Restore on confirmed red -- conn + (malfile OR proc) --
         # malfile=1: real exploit (cmd.exe dropped). proc_flag=1: process event.
-        # Both together or separately = real red session → Restore immediately.
+        # Both together or separately = real red session -> Restore immediately.
         for hostname in _sorted_by_priority(conn_alerts, phase):
             if not (malfile_alerts.get(hostname) or proc_alerts.get(hostname)):
                 continue  # conn-only, may be decoy hit -- handled below
@@ -415,9 +420,7 @@ class EnterpriseHeuristicAgent:
                 continue
             idx = self._restore.get(hostname)
             if idx is not None and self._valid(idx, mask):
-                self._restore_at[hostname] = self._step
-                self._remove_at.pop(hostname, None)
-                self._decoy_deployed.pop(hostname, None)
+                self._issue_restore(hostname)
                 return idx, msg
 
         # -- Priority 1b: Restore on conn-only events WITHOUT decoy coverage --
@@ -433,14 +436,12 @@ class EnterpriseHeuristicAgent:
                 continue  # already handled by P1
             if (self._decoy_deployed.get(hostname, 0) > 0
                     and not upstream_decoys_compromised):
-                continue  # decoy deployed + no bypass reported → likely decoy hit
+                continue  # decoy deployed + no bypass reported -> likely decoy hit
             if self._busy(hostname):
                 continue
             idx = self._restore.get(hostname)
             if idx is not None and self._valid(idx, mask):
-                self._restore_at[hostname] = self._step
-                self._remove_at.pop(hostname, None)
-                self._decoy_deployed.pop(hostname, None)
+                self._issue_restore(hostname)
                 return idx, msg
 
         # -- Priority 1c: Restore on pure malfile (no proc/conn events) --------
@@ -455,9 +456,7 @@ class EnterpriseHeuristicAgent:
                 continue
             idx = self._restore.get(hostname)
             if idx is not None and self._valid(idx, mask):
-                self._restore_at[hostname] = self._step
-                self._remove_at.pop(hostname, None)
-                self._decoy_deployed.pop(hostname, None)
+                self._issue_restore(hostname)
                 return idx, msg
 
         # -- Priority 2: Allow paths per comms_policy (fix stale blocks) ----
@@ -495,19 +494,14 @@ class EnterpriseHeuristicAgent:
                 if self._step > ra:
                     idx = self._restore.get(hostname)
                     if idx is not None and self._valid(idx, mask):
-                        self._restore_at[hostname] = self._step
-                        self._remove_at.pop(hostname, None)
-                        self._decoy_deployed.pop(hostname, None)
+                        self._issue_restore(hostname)
                         return idx, msg
                 continue
 
             # High-priority hosts, sticky flags, or peer escalation -> skip Remove
             # 2-tier escalation based on v9 peer message fields:
-            #   T3 (threshold 0): upstream zone has 3+ compromised hosts → Restore immediately
-            #   default (threshold 1): Restore if proc_flag persists 1+ step (Remove issued first).
-            #     Peer T2 conditions (any_root / upstream_threat>=2 / compound bypass) also
-            #     resolve to threshold=1. Green FPs typically clear within 1 step, so a
-            #     flag_age >= 1 flag is almost certainly real red — fast escalation is correct.
+            #   T3 (threshold 0): upstream zone has 3+ compromised hosts -> Restore immediately
+            #   default (threshold 1): Restore if proc_flag persists 1+ step.
             flag_age = self._step - self._proc_flagged_step.get(hostname, self._step)
             peer_escalate_t3 = peer_state.get("upstream_red_count", 0) >= 3
             peer_escalate_t1 = (
@@ -528,9 +522,7 @@ class EnterpriseHeuristicAgent:
             if _host_priority(hostname, phase) >= 100 or flag_age >= direct_restore_threshold:
                 idx = self._restore.get(hostname)
                 if idx is not None and self._valid(idx, mask):
-                    self._restore_at[hostname] = self._step
-                    self._remove_at.pop(hostname, None)
-                    self._decoy_deployed.pop(hostname, None)
+                    self._issue_restore(hostname)
                     return idx, msg
             else:
                 idx = self._remove.get(hostname)
@@ -545,9 +537,7 @@ class EnterpriseHeuristicAgent:
             if self._remove_at.get(hostname, -1) < 0 and self._restore_at.get(hostname, -1) < 0:
                 idx = self._restore.get(hostname)
                 if idx is not None and self._valid(idx, mask):
-                    self._restore_at[hostname] = self._step
-                    self._remove_at.pop(hostname, None)
-                    self._decoy_deployed.pop(hostname, None)
+                    self._issue_restore(hostname)
                     return idx, msg
 
         # -- Priority 6: Re-deploy decoys after Restore ----------------------
@@ -650,6 +640,12 @@ class EnterpriseHeuristicAgent:
             self._subnet_host_list[sn] = list(subnet_hosts.get(sn, []))
 
     # -- Helpers --------------------------------------------------------------
+
+    def _issue_restore(self, hostname: str) -> None:
+        """Record bookkeeping when issuing a Restore action on hostname."""
+        self._restore_at[hostname] = self._step
+        self._remove_at.pop(hostname, None)
+        self._decoy_deployed.pop(hostname, None)
 
     def _busy(self, hostname: str) -> bool:
         """True if a Remove or Restore is still in progress for this host."""
@@ -828,13 +824,23 @@ def _deploy_priority(hostname: str) -> int:
 
 
 def _pair_priority(from_subnet: str, phase: int) -> int:
-    """Sort priority for Allow/Block actions -- block red entry points first."""
-    if from_subnet in ("contractor_network_subnet", "internet_subnet"): return 200
+    """Sort priority for Allow/Block actions.
+
+    v10: Prioritize the direct RZ->OZ attack path (priority 250) over
+    contractor/internet entry points (200) during mission phases. The most
+    critical block at phase transition is RZ->OZ which cuts the direct
+    lateral movement path to mission-critical hosts. Red may already be in
+    RZ by the time Phase 1/2 starts.
+    """
     if phase == 1:
-        if from_subnet == "restricted_zone_a_subnet": return 100
+        if from_subnet == "restricted_zone_a_subnet": return 250
+        if from_subnet in ("contractor_network_subnet", "internet_subnet"): return 200
     elif phase == 2:
-        if from_subnet == "restricted_zone_b_subnet": return 100
+        if from_subnet == "restricted_zone_b_subnet": return 250
+        if from_subnet in ("contractor_network_subnet", "internet_subnet"): return 200
         if from_subnet == "restricted_zone_a_subnet": return 50
+    else:
+        if from_subnet in ("contractor_network_subnet", "internet_subnet"): return 200
     return 10
 
 
