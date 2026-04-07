@@ -171,10 +171,20 @@ Reward = mean per-agent reward per step × 500 (official `evaluation.py` format)
 |---|---|---|---|
 | SleepAgent (no actions) | -6,488 | ±1,391 | baseline |
 | EnterpriseHeuristicAgent v7 | -221 | ±102 | 96.6% better |
-| **EnterpriseHeuristicAgent v9** | **-214** | **±74** | **96.7% better** |
+| EnterpriseHeuristicAgent v9 | -214 | ±74 | 96.7% better |
+| **EnterpriseHeuristicAgent v9.1** | **-174** | **±58** | **97.3% better** |
 
-v9 is both more effective and **more consistent** than v7 (std dev drops from 102 to 74).
-The tighter spread comes from inter-agent messaging reducing worst-case episodes.
+v9.1 further improves on v9: -174 vs -214 mean reward (seed 42, 30 eps), std dev tightens from ±74 to ±58.
+v9.1 adds six targeted fixes on top of the v9 messaging protocol:
+
+| Fix | Change | Justification |
+|-----|--------|---------------|
+| **Clear `_remove_at` on Restore** | Pop `_remove_at[host]` at every Restore site (6 locations) | After Restore reimages a host, Remove history is stale — fresh exploits should try Remove again rather than escalating to Restore immediately |
+| **Phase 0 host priorities** | `_host_priority()`: OZ hosts=40, RZ hosts=30 in Phase 0 (was generic=20) | Preplanning phase has real threat activity; alert ordering now reflects the mission attack path from the start |
+| **Phase-2 OZA fallback priority** | `_pair_priority()`: RZA→ priority 50 in Phase 2 (was 10) | Residual red presence in RZA from Phase 1 remains a pivot risk; blocking RZA paths in Phase 2 gets higher priority |
+| **Default escalation threshold 2→1** | Priority 4: default `direct_restore_threshold` lowered from 2 to 1 | FSM analysis: from state U, red has 50% PrivEsc chance per step (duration 2); waiting 2 steps gave red a near-certain root window |
+| **Priority 7 `_busy()` guard** | Add `if self._busy(hostname): continue` to initial decoy deploy loop | Without the guard, the agent could attempt DeployDecoy on a mid-Restore host (the decoy is wiped by Restore, wasting the action) |
+| **Slot-shift robustness in BlueFlatWrapper** | Pad message array to `NUM_MESSAGES` before reading | When OZA/OZB become isolated, CybORG delivers fewer than 4 message slots; padding prevents index errors and keeps message decoding deterministic |
 
 ### Core Strategy: Two Pillars
 
