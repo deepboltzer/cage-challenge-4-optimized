@@ -84,6 +84,9 @@ class Impact(Action):
 
         if obs.success:
             obs.add_process(self.hostname, **sp_state[0])
+            # Increment impact_count. Note: host.restore() intentionally does NOT reset
+            # impact_count — the attack has already succeeded and the reward penalty is
+            # already scored. Restore prevents future Impacts but cannot cancel past ones.
             state.hosts[self.hostname].increment_impact_count()
         return obs
 

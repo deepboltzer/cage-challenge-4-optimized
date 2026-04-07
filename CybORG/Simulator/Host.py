@@ -336,11 +336,27 @@ class Host(Entity):
         self.original_services = self._clone_services(self.services)
 
     def restore(self):
-        """Restores the host by filling current class details from 'original' class attributes"""
+        """Restores the host by filling current class details from 'original' class attributes.
+
+        Event-list policy:
+          - process_creation and network_connections (incoming queues) are cleared — a reimaged
+            host produces no new events for the current step.
+          - old_process_creation and old_network_connections are intentionally PRESERVED.
+            Monitor.execute() moves events to old_* in the same step that Restore fires.
+            BlueFlatWrapper reads old_* to build the observation. Clearing old_* here would
+            destroy events that Monitor has already staged for the current observation, causing
+            silent event loss and preventing blue agents from seeing the alert that triggered
+            the Restore. Monitor overwrites old_* at the start of the next step anyway.
+
+        Impact-count note:
+          impact_count is intentionally NOT reset by Restore. A successful Impact action has
+          already been scored (penalty applied). Restore cannot undo damage that already
+          occurred. This is by design: Restore prevents *future* damage but does not cancel
+          the penalty for completed Impacts.
+        """
         self.events.network_connections.clear()
-        self.events.old_network_connections.clear()
         self.events.process_creation.clear()
-        self.events.old_process_creation.clear()
+        # old_network_connections and old_process_creation are preserved — see docstring.
         self.files = []
         if self.original_files is not None:
             for file in self.original_files:

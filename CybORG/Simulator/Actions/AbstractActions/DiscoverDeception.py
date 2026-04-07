@@ -84,20 +84,26 @@ class DiscoverDeception(RemoteAction):
         # (a) obtain the list of processes running on the target host
         processes = state.hosts[self.target_hostname].processes
         for process in processes:
-            # (b) we only detect decoys if detection_rate is lower than random float
-            # can result in false negatives or positive as every process has the 'decoy' property added
-            if state.np_random.random() <= self.detection_rate and process.decoy_type.name == 'EXPLOIT':
-                obs.add_process(hostid=self.target_hostname, pid=process.pid,
-                    parent_pid=process.ppid, name=process.name,
-                    username=process.user, service_name=process.name,
-                    properties=process.properties + ['decoy',])
-                obs.add_interface_info(hostid=self.target_hostname, ip_address=self.ip_address)
-            elif state.np_random.random() <= self.fp_rate and process.decoy_type.name != 'EXPLOIT':
-                obs.add_process(hostid=self.target_hostname, pid=process.pid,
-                    parent_pid=process.ppid, name=process.name,
-                    username=process.user, service_name=process.name,
-                    properties=process.properties + ['decoy',])
-                obs.add_interface_info(hostid=self.target_hostname, ip_address=self.ip_address)
+            # (b) TP and FP branches are mutually exclusive per process:
+            #   - EXPLOIT decoys: apply true-positive detection rate (50% chance of correct detection)
+            #   - Non-decoy processes: apply false-positive rate (10% chance of incorrect flagging)
+            # Using a single RNG draw per process ensures the branches cannot both fire.
+            if process.decoy_type.name == 'EXPLOIT':
+                # True positive branch: EXPLOIT decoy correctly detected
+                if state.np_random.random() <= self.detection_rate:
+                    obs.add_process(hostid=self.target_hostname, pid=process.pid,
+                        parent_pid=process.ppid, name=process.name,
+                        username=process.user, service_name=process.name,
+                        properties=process.properties + ['decoy',])
+                    obs.add_interface_info(hostid=self.target_hostname, ip_address=self.ip_address)
+            else:
+                # False positive branch: legitimate process incorrectly flagged as decoy
+                if state.np_random.random() <= self.fp_rate:
+                    obs.add_process(hostid=self.target_hostname, pid=process.pid,
+                        parent_pid=process.ppid, name=process.name,
+                        username=process.user, service_name=process.name,
+                        properties=process.properties + ['decoy',])
+                    obs.add_interface_info(hostid=self.target_hostname, ip_address=self.ip_address)
         return obs
 
     def __str__(self):

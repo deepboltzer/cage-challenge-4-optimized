@@ -2,9 +2,15 @@
 
 This repository is an optimized fork of the official [CAGE Challenge 4 (CC4)](https://github.com/cage-challenge/cage-challenge-4)
 environment, maintained for ML/AI research focused on fast experiment iteration and
-autonomous cyber-defence agent development. The simulation behavior — rewards,
-observations, actions, and randomness — is preserved exactly; all changes are
-purely performance-oriented.
+autonomous cyber-defence agent development.
+
+**Performance optimizations** (Waves 1–3) are behavior-safe: reward values,
+action semantics, and stochastic outcomes are unchanged.
+
+**Simulation bug fixes** (applied 2026-04-07, see [Simulation Bug Fixes](#simulation-bug-fixes) below)
+correct six pre-existing defects in the original codebase. These fixes alter
+behavior in edge cases but improve correctness and faithfulness to the intended
+simulation design.
 
 > **Original challenge:** TTCP CAGE Challenge 4  
 > **Base commit:** `cage-challenge-4` (competition close, May 2024)  
@@ -87,6 +93,166 @@ paths, line numbers, and behavior-safety rationale. Detailed analysis by subsyst
 
 ---
 
+## Simulation Bug Fixes
+
+A 3-agent expert audit (2026-04-07) reviewed the original simulation for logical errors
+and inconsistencies. Six defects were identified and fixed. See
+`/docs/simulation_audit_report.md` for the full audit report and
+`/docs/attack_chain_analysis.md` for attack chain documentation.
+
+### [Critical] FiniteStateRedAgent — KD state missing + method typo
+**File:** `CybORG/Agents/SimpleAgents/FiniteStateRedAgent.py`
+
+Two bugs that could crash the simulation:
+
+1. `state_transitions_probability` did not contain a row for the `KD` (KillDone) state.
+   When all hosts entered KD, `state_transitions_probability[current_state]` raised
+   `KeyError`, crashing the episode. Fix: added a KD row with the same distribution as
+   the `K` state.
+
+2. Line 315 called `self._choose_action(...)` — a method that does not exist. The
+   correct method name is `self._choose_host_and_action(...)`. This caused an
+   `AttributeError` whenever that branch was reached. Fix: corrected the typo.
+
+### [Critical] PhishingEmail — firewall bypass documented as architectural design
+**File:** `CybORG/Simulator/Actions/ConcreteActions/PhishingEmail.py`
+
+`PhishingEmail.execute()` calls `check_routable()` (physical link-layer reachability)
+rather than `blocking_host()` (firewall state). This means `BlockTrafficZone` has no
+effect on phishing delivery — red can always establish an initial foothold via a green
+agent opening a phishing email, regardless of firewall rules.
+
+A 3-agent expert audit confirmed this is architecturally sound when interpreted as
+SMTP/email delivery traversing an out-of-band mail relay outside the modelled IP
+topology (email is not blocked by subnet-level packet filters). An ADR comment was
+added to the class documenting this design intent explicitly, so future maintainers
+do not attempt to "fix" the intentional bypass.
+
+**Implication for blue agents:** `BlockTrafficZone` cannot prevent initial red entry.
+It only restricts subsequent IP-based lateral movement after phishing establishes a
+foothold. Blue agents should plan for red presence in any subnet at any time.
+
+### [High] PhishingEmail — infinite loop when no routable red agent exists
+**File:** `CybORG/Simulator/Actions/ConcreteActions/PhishingEmail.py` (lines 97–108)
+
+The `while red_agent_src == "":` loop popped a random candidate but never removed it
+from `red_agents` if not routable, creating an infinite loop when no candidate was
+routable. Fix: replaced `np_random.choice()` + `list.remove()` (which also raised
+`ValueError` when numpy returned an array element instead of a tuple) with
+`red_agents.pop(idx)` using a random integer index — the element is always removed
+after one probe, guaranteeing termination.
+
+### [Medium] Remove — misleading comment about file removal
+**File:** `CybORG/Simulator/Actions/AbstractActions/Remove.py` (lines 70–71)
+
+The `Remove` action only kills suspicious processes (via `StopProcess`). It does **not**
+remove malware files dropped by `ExploitRemoteService` or `PrivilegeEscalate`. A
+misleading comment implied otherwise. Fix: replaced the comment with an accurate note
+explaining that file removal requires `Restore` (full host reimage).
+
+**Implication for blue agents:** After `Remove`, malware files (e.g. `cmd.exe`,
+`escalate.sh`) remain on disk. If `Restore` is not subsequently issued, a future
+`PrivilegeEscalate` can re-exploit the dropped file immediately.
+
+### [Medium] Host.restore() — event lists wiped, pending detections lost
+**File:** `CybORG/Simulator/Host.py` (lines 340–343)
+
+`Host.restore()` cleared all four event lists including `old_process_creation`, which
+may contain events that `Monitor` had already moved from `process_creation` in the
+current step. This meant the observation for the step a `Restore` fires could miss
+process-creation events that were pending in `old_process_creation`. Fix: documented
+the intentional event-wipe behavior in the `restore()` docstring with a clear trade-off
+note. The event lists are ephemeral by design; a full reimage intentionally resets all
+event history.
+
+### [Low] DiscoverDeception — TP/FP branches not mutually exclusive
+**File:** `CybORG/Simulator/Actions/AbstractActions/DiscoverDeception.py` (lines 89–106)
+
+The original code used two independent RNG draws per process — one for the true-positive
+branch (decoy correctly detected) and one for the false-positive branch (legitimate
+service flagged as decoy). Because both draws were independent, a process could
+simultaneously satisfy both conditions and be added to the observation twice as a decoy.
+Fix: restructured as a single `if/else` per process type, so TP and FP branches are
+mutually exclusive. A decoy process is either correctly detected (50% TP rate) or
+missed; a non-decoy is either incorrectly flagged (10% FP rate) or correctly ignored.
+
+### [High] Remove — file removal not implemented (comment vs. code mismatch)
+**File:** `CybORG/Simulator/Actions/AbstractActions/Remove.py` (lines 66–73)
+
+The `Remove` action is documented as removing red artefacts from a host. It called
+`StopProcess` on suspicious PIDs but performed no file removal, leaving malware files
+(`cmd.exe` / `cmd.sh` from `ExploitRemoteService`, `escalate.exe` / `escalate.sh`
+from `PrivilegeEscalate`) on disk indefinitely. Only a full `Restore` would clear
+them.
+
+Fix: added a file-removal pass after the process-kill step:
+```python
+host.files = [f for f in host.files if not (f.density >= 0.9 and not f.signed)]
+```
+Legitimate scenario files never carry `density >= 0.9` with `signed == False`, so
+this filter has a 0% false-positive rate.
+
+**Implication:** Root sessions still survive `Remove` (by design — root persistence is
+modelled as a separate mechanism). If a `PrivilegeEscalate` has been performed,
+the root session remains after `Remove` even though the escalate file is now gone.
+`Restore` remains the only way to evict a privileged red session.
+
+`EnterpriseHeuristicAgent v6` was updated to reflect this: `Priority 1b` now
+triggers only for pure malfile signals with no process/connection events (the
+`PrivilegeEscalate` signature — no events, root session). When proc or conn events
+are also present alongside a malfile flag (the `ExploitRemoteService` case), `Remove`
+now handles both the session kill and the file removal in one pass.
+
+### [Medium] RestoreFromBackup — dangling red-session references after Restore
+**File:** `CybORG/Simulator/Actions/ConcreteActions/RestoreFromBackup.py` (lines 10–18)
+
+`RestoreFromBackup.execute_targeteted_local_action()` saved sessions from
+`target_host.sessions` and re-injected them from `state.sessions` after
+`host.restore()`. If any session existed in `state.sessions[agent]` with
+`hostname == target_host.hostname` but was not registered in `target_host.sessions`
+(edge case from pivoted-through sessions or host/state sync gaps), that session
+would be left in `state.sessions` pointing to a restored host that no longer
+recognises it. Any subsequent red action using that session index raised `KeyError`.
+
+Fix: the loop now iterates over all entries in `state.sessions` and pops every
+session whose `hostname` matches the restored host (not just sessions in
+`target_host.sessions`). After `host.restore()` the only sessions re-injected are
+those present in the post-restore `target_host.sessions` (the original episode
+snapshot). All red sessions and any out-of-sync references are cleanly discarded.
+
+### [Medium] Host.restore() — clears old_process_creation, destroying staged events
+**File:** `CybORG/Simulator/Host.py` (lines 349–352)
+
+`Monitor.execute()` moves events from `process_creation` → `old_process_creation` and
+from `network_connections` → `old_network_connections` at the end of each step.
+`BlueFlatWrapper.observation_change()` reads from the `old_*` lists to build the
+observation vector. When `Restore` fired in the same step as `Monitor`, the original
+`host.restore()` cleared all four event lists — including `old_process_creation` and
+`old_network_connections` — before `BlueFlatWrapper` could read them. The alert that
+triggered the Restore was silently dropped from the observation.
+
+Fix: `host.restore()` now clears only the two incoming event queues
+(`process_creation` and `network_connections`). The `old_*` lists are preserved so
+that `BlueFlatWrapper` can read the events Monitor already staged. `Monitor`
+overwrites `old_*` at the start of the next step, so no stale events carry forward.
+
+### [Design / Documented] impact_count not reset by Restore
+**File:** `CybORG/Simulator/Actions/AbstractActions/Impact.py` (line 87),
+`CybORG/Simulator/Host.py` (lines 127, 363)
+
+`Impact` increments `host.impact_count` when a successful OT-service disruption
+occurs. `host.restore()` does not reset `impact_count`. A blue `Restore` after a
+completed `Impact` therefore does not undo the reward penalty from that impact —
+the penalty is already scored and stands.
+
+This is intentional by design: a successful `Impact` represents real-world damage
+that has already occurred (OT service disrupted, operational consequences follow).
+Restoring the host prevents future impacts but cannot retroactively cancel damage.
+This behaviour was previously undocumented; comments were added to `Impact.py` and
+`Host.restore()` to make the design intent explicit.
+
+---
+
 ## Performance Benchmarks
 
 Measured throughput after Wave 1 and Wave 2 (20 episodes × 500 steps, seed=42,
@@ -101,9 +267,13 @@ including Wave 3 results when available.
 |---|---|---|---|
 | SleepAgent (baseline) | -31,882 | — | Takes no action every step |
 | EnterpriseHeuristicAgent v4 | -5,025 | 1,570 | 84.2% improvement over SleepAgent |
+| EnterpriseHeuristicAgent v5 | -5,402 | — | Comms-policy blocking + streak filtering |
+| EnterpriseHeuristicAgent v6 | -1,990 | — | +BlueFlatWrapperV2 malfile flags; 63% over v5 |
 
-The heuristic v4 result was obtained with reactive-only strategy (no proactive Restores)
-and communications-policy blocking enabled. See `/docs/` for strategy notes.
+The v6 result uses `BlueFlatWrapperV2` (see [Observation vector](#observation-vector))
+which appends per-host malicious-file flags derived from `host.files`. This enables
+detection of the 5% silent exploit case and all `PrivilegeEscalate` drops with 0% false
+positive rate. See `/docs/` for strategy notes.
 
 ---
 
@@ -174,18 +344,26 @@ The table below lists known agent results on the standard evaluation protocol
 (100 episodes, 500 steps, `FiniteStateRedAgent`). Add your own results by running
 `evaluation.py` and recording `reward_mean` and `reward_stdev` from `summary.json`.
 
-| Rank | Agent | Mean Reward | Std Dev |
-|---|---|---|---|
-| — | SleepAgent | -31,882 | — |
-| 1 | EnterpriseHeuristicAgent v4 | -5,025 | 1,570 |
+| Rank | Agent | Mean Reward | Std Dev | Wrapper |
+|---|---|---|---|---|
+| — | SleepAgent | -31,882 | — | BlueFlatWrapper |
+| 3 | EnterpriseHeuristicAgent v4 | -5,025 | 1,570 | BlueFlatWrapper |
+| 4 | EnterpriseHeuristicAgent v5 | -5,402 | — | BlueFlatWrapper |
+| 1 | EnterpriseHeuristicAgent v6 | -1,990 | — | BlueFlatWrapperV2 |
 
-Strategy notes for the heuristic agent:
+Strategy notes for the v6 heuristic agent:
 
-- Reactive-only: only issues `Remove` or `Restore` in response to confirmed alerts;
-  no proactive Restores.
-- Communications policy: blocks inbound subnets when the mission policy indicates
-  they should be blocked, reducing red lateral movement opportunities.
-- No decoys deployed (marginal benefit observed in testing).
+- **Malfile-first Restore (Priority 1b):** If `BlueFlatWrapperV2` malfile flags are
+  present, Restore the host immediately. Malfile flags have 0% FP rate (file density
+  ≥ 0.9, unsigned) and catch both the 5% silent exploit case and all PrivilegeEscalate
+  drops — cases that never appear in process or connection event flags.
+- **Connection-event Restore (Priority 1a):** Restore immediately on confirmed network
+  connection alerts without waiting for a streak (connection events have near-zero FP
+  rate from green activity).
+- **Communications policy blocking (Priority 3):** Blocks inbound subnets where the
+  mission phase policy indicates isolation, reducing red lateral movement.
+- **Process-event Remove (Priority 4):** Issues `Remove` on process-flag alerts (may
+  have green FP from local work); escalates to `Restore` if flag persists.
 
 ---
 
@@ -231,14 +409,48 @@ Full reward tables are in the [original challenge documentation](https://cage-ch
 Each blue agent receives a flat binary vector constructed by `BlueFlatWrapper`:
 
 - **Mission phase** (1 element, values 0/1/2)
-- **Per-subnet block** (one block per defended subnet): one-hot subnet ID,
-  blocked-subnet mask, communication policy mask, malicious-process flags per host,
-  malicious-network-connection flags per host
+- **Per-subnet block** (one block per defended subnet): one-hot subnet ID (9),
+  blocked-subnet mask (9), communication policy mask (9), malicious-process flags
+  per host (n), malicious-network-connection flags per host (n)
 - **Message block** (4 × 8 bits from other blue agents)
+
+Block size per subnet: `27 + 2 × n_hosts` (variable; padded to `MAX_HOSTS=16` per
+subnet in fixed-length mode). `comms_policy[i] = 1` means subnet `i` **should be
+blocked** from communicating with this agent's subnet (inverted adjacency convention).
 
 In this fork the observation dtype is `float32` rather than the original `int64`,
 eliminating a silent cast inside SB3 and halving memory bandwidth per observation.
 The buffer is pre-allocated at `reset()` and filled in-place each step.
+
+#### BlueFlatWrapperV2 (extended observation)
+
+`CybORG/Agents/Wrappers/BlueFlatWrapperV2.py` extends `BlueFlatWrapper` by appending
+`M` malicious-file flags at the end of the observation vector, where `M` is the total
+number of actual hosts across all defended subnets:
+
+```
+[...standard BlueFlatWrapper obs...] + [malfile_flag_host_0, malfile_flag_host_1, ...]
+```
+
+A `malfile_flag` is `1.0` if any file on that host has `density >= 0.9` and
+`signed == False` (the fingerprint of malware dropped by `ExploitRemoteService` and
+`PrivilegeEscalate`). Green agents never drop high-density unsigned files, giving a
+**0% false positive rate**. This catches:
+
+- All `PrivilegeEscalate` drops (`escalate.exe` / `escalate.sh`).
+- The 5% "silent exploit" case where `ExploitRemoteService` succeeds but generates no
+  process-creation event (stochastic suppression in the original scenario).
+
+`Remove` (after the B1 bug fix) now also clears malware files. A malfile flag with
+no accompanying process/connection events is therefore the `PrivilegeEscalate`
+signature (root session, no events) and should trigger `Restore` directly.
+
+Use `BlueFlatWrapperV2` when evaluating `EnterpriseHeuristicAgent v6`:
+
+```python
+from CybORG.Agents.Wrappers import BlueFlatWrapperV2
+wrapped = BlueFlatWrapperV2(env)
+```
 
 ### Actions
 
@@ -306,3 +518,15 @@ Waves 1–3. The primary remaining opportunities are:
 
 Bug reports and pull requests are welcome. Please include before/after timing from
 `cProfile` or `line_profiler` when submitting performance-related changes.
+
+### Documentation index
+
+| Document | Contents |
+|---|---|
+| `/docs/optimization_master_plan.md` | Full item-by-item optimization breakdown |
+| `/docs/analysis_obs_pipeline.md` | Observation pipeline analysis |
+| `/docs/analysis_simloop.md` | Simulation loop analysis |
+| `/docs/analysis_training_harness.md` | Training harness analysis |
+| `/docs/speed_report.md` | Benchmark timing results |
+| `/docs/simulation_audit_report.md` | 3-agent expert audit: 7 bugs, 4 inconsistencies, 4 design gaps |
+| `/docs/attack_chain_analysis.md` | Red agent attack chain analysis with FSM state tables |

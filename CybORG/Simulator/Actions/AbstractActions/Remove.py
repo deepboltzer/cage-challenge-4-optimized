@@ -67,7 +67,14 @@ class Remove(Action):
             for sus_pid in parent_session.sus_pids[self.hostname]:
                 action = StopProcess(session=self.session, agent=self.agent, target_session=session.ident, pid=sus_pid)
                 action.execute(state)
-        # remove suspicious files
+        # Remove malware files (density>=0.9 unsigned) dropped by ExploitRemoteService
+        # (cmd.exe / cmd.sh) and PrivilegeEscalate (escalate.exe / escalate.sh).
+        # Legitimate files never have density>=0.9 with signed=False.
+        # Note: root sessions survive Remove. If PrivilegeEscalate has been performed,
+        # the root session remains active even after the file is removed. Use Restore
+        # to fully evict a privileged red session.
+        host = state.hosts[self.hostname]
+        host.files = [f for f in host.files if not (f.density >= 0.9 and not f.signed)]
         return Observation(True)
 
     def __str__(self):

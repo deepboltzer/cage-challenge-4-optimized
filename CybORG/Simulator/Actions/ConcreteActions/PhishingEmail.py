@@ -11,6 +11,20 @@ class PhishingEmail(RemoteAction):
     The action creates a new red shell session on the Host that the green agent has a session on. This gives the red agent a foothold on that system.
     The red agent that gets the shell session should be located in the same subnet as the green agent.
 
+    DESIGN DECISION (ADR-CC4-001): PhishingEmail intentionally bypasses BlockTrafficZone firewall rules.
+    ------------------------------------------------------------------------------------------------
+    Phishing emails are delivered via external SMTP/email infrastructure, not via IP routing.
+    A subnet-level firewall (BlockTrafficZone / state.blocks) controls IP packet forwarding and
+    does NOT intercept email traffic, which transits via an out-of-band mail relay outside the
+    modelled network topology.
+
+    For this reason, this action uses check_routable() (physical link-layer connectivity) rather
+    than blocking_host() (firewall state). The firewall cannot block email delivery; it can only
+    block subsequent lateral movement over IP once red has an initial foothold from phishing.
+
+    This is intentionally inconsistent with ExploitRemoteService and other RemoteAction subclasses,
+    which DO respect BlockTrafficZone because they operate over IP routing.
+
     Attributes:
         ip_address (IPv4Address): IP address of the host that the green agent has a session on
 
@@ -85,7 +99,9 @@ class PhishingEmail(RemoteAction):
                 self.log("No red_agents are routable to green host.")
                 return obs.set_success(False)
 
-            r_agent = state.np_random.choice(red_agents, replace=False)
+            # pop a random candidate and remove it from the list to prevent infinite iteration
+            idx = int(state.np_random.integers(len(red_agents)))
+            r_agent = red_agents.pop(idx)
 
             if self.check_routable(state=state, target=green_hostname, source=r_agent[1]):
                 red_agent_src = r_agent[0]

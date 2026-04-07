@@ -312,7 +312,7 @@ class FiniteStateRedAgent(BaseAgent):
             else:
                 new_options = host_options[:]
                 new_options.pop(chosen_host)
-                return self._choose_action(action_space, new_options)
+                return self._choose_host_and_action(action_space, new_options)
             # select random options
             action_params = {}
             for param_name in self.action_params[action_class]:
@@ -539,7 +539,9 @@ class FiniteStateRedAgent(BaseAgent):
 
         map = {
             'K'  : [0.5,  0.25, 0.25, None, None, None, None, None, None],
-            'KD' : [None, 0.5,  0.5,  None, None, None, None, None, None],
+            # KD: decoy detected — re-scan to find legitimate services (same split as K).
+            # Previously absent, causing AttributeError crash when all hosts were in KD.
+            'KD' : [0.5,  0.25, 0.25, None, None, None, None, None, None],
             'S'  : [0.25, None, None, 0.25, 0.5 , None, None, None, None],
             'SD' : [None, None, None, 0.25, 0.75, None, None, None, None],
             'U'  : [0.5 , None, None, None, None, 0.5 , None, None, 0.0 ],
