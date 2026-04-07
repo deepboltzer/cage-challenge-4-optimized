@@ -13,13 +13,18 @@ from CybORG.Shared.Results import Results
 from CybORG.Shared.Session import RedAbstractSession
 from CybORG.Simulator.Actions import BlockTraffic, DiscoverNetworkServices, DiscoverRemoteSystems, ExploitRemoteService, PrivilegeEscalate, Analyse, Remove, Restore, RemoveOtherSessions, Impact
 from CybORG.Simulator.Actions.Action import Action, RemoteAction, Sleep, InvalidAction
-from CybORG.Simulator.Actions.ConcreteActions.ControlTraffic import AllowTraffic
+from CybORG.Simulator.Actions.ConcreteActions.ControlTraffic import AllowTraffic, ControlTraffic
 from CybORG.Shared.Observation import Observation
 from CybORG.Shared.RewardCalculator import RewardCalculator
 from CybORG.Shared.Scenarios.ScenarioGenerator import ScenarioGenerator
 from CybORG.Simulator.State import State
 from CybORG.Simulator.Scenarios import EnterpriseScenarioGenerator 
 
+
+
+# Module-level sentinel: avoids allocating a new Action() object on every
+# actions.get(agent, Action()) call in the reward loop (OPT-15).
+_NO_ACTION = Action()
 
 
 class SimulationController(CybORGLogger):
@@ -114,6 +119,14 @@ class SimulationController(CybORGLogger):
         self._reward_state_cache_step: int = -1
         self._ip_set_cache = None
         self._cidr_set_cache = None
+        # P3-D: wireless neighbor pre-computation cache (host -> set of wireless-linked hostnames)
+        # Populated at reset(); topology is episode-static so no mid-episode invalidation needed.
+        self._wireless_neighbors: dict = {}
+        # P3-E: connected-agents result cache (agent -> list of connected agent names)
+        # Invalidated whenever a ControlTraffic action (Block/Allow) executes.
+        self._connected_agents_cache: dict = {}
+        # Cache isinstance check — scenario_generator type never changes after construction
+        self._is_enterprise: bool = isinstance(scenario_generator, EnterpriseScenarioGenerator)
 
         # --- Scenario pool (Optimization 1) ---
         # Pre-generate a small pool of scenarios at startup so that reset() can
@@ -212,6 +225,19 @@ class SimulationController(CybORGLogger):
             scenario = self.scenario_generator.create_scenario(self.np_random)
         self._create_environment(scenario)
 
+        # P3-D: pre-compute wireless neighbor sets (episode-static topology)
+        self._wireless_neighbors = {}
+        for hostname, host in self.state.hosts.items():
+            neighbors: set = set()
+            for interface in host.interfaces:
+                if interface.interface_type == 'wireless':
+                    for linked_host in interface.data_links:
+                        neighbors.add(linked_host)
+            self._wireless_neighbors[hostname] = neighbors
+
+        # P3-E: invalidate connected-agents cache for new episode
+        self._connected_agents_cache = {}
+
         self.agent_interfaces = self._create_agents(scenario, self.agents)
         self.team = scenario.team_agents
         self.team_assignments = scenario.get_team_assignments()
@@ -241,7 +267,7 @@ class SimulationController(CybORGLogger):
             for reward_name, r_calc in team_calcs.items():
                 self.reward[team_name][reward_name] = self.calculate_reward(r_calc)
         # changes to step and mission phase will only effect CC4
-        if isinstance(self.scenario_generator, EnterpriseScenarioGenerator):
+        if self._is_enterprise:
             # update step in state and calc current mission phase to step = 0
             self.state.mission_phase = 0
             # update allowed subnets in all agent interfaces and agent spaces
@@ -260,7 +286,7 @@ class SimulationController(CybORGLogger):
         
         """
         # changes to step and mission phase will only effect CC4
-        if isinstance(self.scenario_generator, EnterpriseScenarioGenerator):
+        if self._is_enterprise:
             # update step in state and calc current mission phase
             # if mission phase has changed (inc.) then return True else return False
             if self.state.check_next_phase_on_update_step(self.step_count):
@@ -347,7 +373,7 @@ class SimulationController(CybORGLogger):
             self.reward[team_name] = {}
             for reward_name, r_calc in team_calcs.items():
                 self.reward[team_name][reward_name] = self.calculate_reward(r_calc)
-            action_cost = sum(actions.get(agent, Action()).cost for agent in self.team[team_name])
+            action_cost = sum(actions.get(agent, _NO_ACTION).cost for agent in self.team[team_name])
             self.reward[team_name]['action_cost'] = action_cost
 
         for host in self.state.hosts.values():
@@ -372,6 +398,9 @@ class SimulationController(CybORGLogger):
         : Observation
             the observation resulting from the performed action
         """
+        # P3-E: Block/Allow actions mutate state.blocks, invalidating routing reachability results.
+        if isinstance(action, ControlTraffic):
+            self._connected_agents_cache = {}
         return action.execute(self.state)
 
     def get_true_state(self, info: dict) -> Observation:
@@ -511,14 +540,12 @@ class SimulationController(CybORGLogger):
                             bandwidth_usage[host] += action.bandwidth_usage
                         else:
                             bandwidth_usage[host] = action.bandwidth_usage
-                        # and bandwidth from all surrounding hosts
-                        for interface in self.state.hosts[host].interfaces:
-                            if interface.interface_type == 'wireless':
-                                for h in interface.data_links:
-                                    if h in bandwidth_usage:
-                                        bandwidth_usage[h] += action.bandwidth_usage
-                                    else:
-                                        bandwidth_usage[h] = action.bandwidth_usage
+                        # and bandwidth from all surrounding wireless-linked hosts (P3-D cache lookup)
+                        for h in self._wireless_neighbors.get(host, ()):
+                            if h in bandwidth_usage:
+                                bandwidth_usage[h] += action.bandwidth_usage
+                            else:
+                                bandwidth_usage[h] = action.bandwidth_usage
                         # if the maximum bandwidth is exceeded then the action is droppped and doesn't continue down the route
                         if bandwidth_usage[host] > self.max_bandwidth:
                             self.dropped_actions.append(action)
@@ -555,7 +582,16 @@ class SimulationController(CybORGLogger):
         return filtered_actions
 
     def get_connected_agents(self, agent: str) -> list:
-        """Gets a list of agents that are connected the the agent"""
+        """Gets a list of agents that are connected the the agent.
+
+        P3-E: result is cached per agent and invalidated whenever a ControlTraffic
+        action (Block/Allow) executes, since those mutate state.blocks which
+        affects check_routable results.
+        """
+        # P3-E: return cached result if available
+        if agent in self._connected_agents_cache:
+            return self._connected_agents_cache[agent]
+
         # get agents host
         hostname = None
         for sessions, session_obj in self.state.sessions[agent].items():
@@ -563,7 +599,9 @@ class SimulationController(CybORGLogger):
                 hostname = session_obj.hostname
 
         if hostname is None:
-            return [agent]
+            result = [agent]
+            self._connected_agents_cache[agent] = result
+            return result
 
         # get all connected hosts
         connected_hosts = []
@@ -581,6 +619,8 @@ class SimulationController(CybORGLogger):
                 if session.hostname in connected_hosts and session.parent is None:
                     connected_agents.append(other_agent)
                     break
+
+        self._connected_agents_cache[agent] = connected_agents
         return connected_agents
 
     def get_render_data(self):
@@ -897,7 +937,7 @@ class SimulationController(CybORGLogger):
         This is only required for the EnterpriseScenarioGenerator, and will cause the failure of tests that utilise older scenarios if instance not checked.
         """
 
-        if isinstance(self.scenario_generator, EnterpriseScenarioGenerator):
+        if self._is_enterprise:
             red_allowed_subnets_map = { agent_name : agent.allowed_subnets for agent_name, agent in self.agent_interfaces.items() if 'red' in agent_name}
             sessions_to_reassign = []
             
@@ -915,52 +955,53 @@ class SimulationController(CybORGLogger):
                         }
                         sessions_to_reassign.append(reassign)
 
-            # Find the agent that should own the session
-            for red_owner, allowed_subnets in red_allowed_subnets_map.items():
-                for reassign_dict in sessions_to_reassign:
-                    if reassign_dict['host_subnet'] in allowed_subnets:
-                        reassign_dict['new_agent'] = red_owner
+            if sessions_to_reassign:
+                # Find the agent that should own the session
+                for red_owner, allowed_subnets in red_allowed_subnets_map.items():
+                    for reassign_dict in sessions_to_reassign:
+                        if reassign_dict['host_subnet'] in allowed_subnets:
+                            reassign_dict['new_agent'] = red_owner
 
-            # For each of the sessions to reassign
-            for reassignment in sessions_to_reassign:
-                # Reassign sessions (remove old and add new)
-                old_session = self.state.sessions[reassignment['orig_agent']].pop(reassignment['orig_session_id'])
-                new_session = RedAbstractSession(
-                    hostname=old_session.hostname, username=old_session.username,
-                    agent=reassignment['new_agent'], parent=None, pid=old_session.pid,
-                    session_type=Enums.SessionType.RED_ABSTRACT_SESSION,
-                    timeout=old_session.timeout, ident = None,
-                    is_escalate_sandbox=old_session.is_escalate_sandbox,
-                )
-                self.state.add_session(new_session)
-                self.state.sessions_count[reassignment['orig_agent']]-=1
+                # For each of the sessions to reassign
+                for reassignment in sessions_to_reassign:
+                    # Reassign sessions (remove old and add new)
+                    old_session = self.state.sessions[reassignment['orig_agent']].pop(reassignment['orig_session_id'])
+                    new_session = RedAbstractSession(
+                        hostname=old_session.hostname, username=old_session.username,
+                        agent=reassignment['new_agent'], parent=None, pid=old_session.pid,
+                        session_type=Enums.SessionType.RED_ABSTRACT_SESSION,
+                        timeout=old_session.timeout, ident = None,
+                        is_escalate_sandbox=old_session.is_escalate_sandbox,
+                    )
+                    self.state.add_session(new_session)
+                    self.state.sessions_count[reassignment['orig_agent']]-=1
 
-                self.state.hosts[new_session.hostname].sessions[reassignment['orig_agent']].remove(reassignment['orig_session_id'])
-                reassignment['new_session_id'] = new_session.ident
+                    self.state.hosts[new_session.hostname].sessions[reassignment['orig_agent']].remove(reassignment['orig_session_id'])
+                    reassignment['new_session_id'] = new_session.ident
 
-                # Edit + Add Observation
-                new_obs = None
-                for i, obs in enumerate(self.observation[reassignment['orig_agent']].observations):
-                    if reassignment['host_ip'] in obs.data.keys():
-                        for obs_sess in obs.data[reassignment['host_ip']]['Sessions']:
-                            if obs_sess['agent'] == reassignment['orig_agent'] and obs_sess['session_id'] == reassignment['orig_session_id']:
-                                # Edit the current agent's observation
-                                obs_sess['agent'] = reassignment['new_agent']
-                                obs_sess['session_id'] = reassignment['new_session_id']
-                                obs_sess['Type'] = Enums.SessionType.RED_ABSTRACT_SESSION
+                    # Edit + Add Observation
+                    new_obs = None
+                    for i, obs in enumerate(self.observation[reassignment['orig_agent']].observations):
+                        if reassignment['host_ip'] in obs.data.keys():
+                            for obs_sess in obs.data[reassignment['host_ip']]['Sessions']:
+                                if obs_sess['agent'] == reassignment['orig_agent'] and obs_sess['session_id'] == reassignment['orig_session_id']:
+                                    # Edit the current agent's observation
+                                    obs_sess['agent'] = reassignment['new_agent']
+                                    obs_sess['session_id'] = reassignment['new_session_id']
+                                    obs_sess['Type'] = Enums.SessionType.RED_ABSTRACT_SESSION
 
-                                # Add this as a new observation to the new agent
-                                new_obs = obs.copy()
-                                remove_keys = [k for k in new_obs.data.keys() if not k == reassignment['host_ip'] and not k == 'action' and not k == 'success']
-                                for key in remove_keys:
-                                    new_obs.data.pop(key)
+                                    # Add this as a new observation to the new agent
+                                    new_obs = obs.copy()
+                                    remove_keys = [k for k in new_obs.data.keys() if not k == reassignment['host_ip'] and not k == 'action' and not k == 'success']
+                                    for key in remove_keys:
+                                        new_obs.data.pop(key)
 
-                                new_obs.raw = reassignment['orig_agent'] + "'s action created a new session."
-                                new_obs.data.pop('action')
-                                new_obs.data['success'] = TernaryEnum.UNKNOWN
+                                    new_obs.raw = reassignment['orig_agent'] + "'s action created a new session."
+                                    new_obs.data.pop('action')
+                                    new_obs.data['success'] = TernaryEnum.UNKNOWN
 
-                                self.observation[reassignment['new_agent']].observations.append(new_obs)
-                        break
+                                    self.observation[reassignment['new_agent']].observations.append(new_obs)
+                            break
 
         # if agent is not active but has sessions then activate
         for agent_name, agent_int in self.agent_interfaces.items():

@@ -52,14 +52,14 @@ class SUBNET(str, Enum):
 
 
 class EnterpriseScenarioGenerator(ScenarioGenerator):
-    """ 
+    """
     This class is used to generate scenarios designed for the Cage Challenge 4 (CC4)
 
     Attributes
     ----------
     background_image : str
         path to a background render image
-    used_pids: List[int]
+    used_pids: set[int]
     blue_agent_class : BaseAgent
         class instance that inherits from BaseAgent to be used in scenario for blue agents
     red_agent_class : BaseAgent
@@ -92,6 +92,134 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
     MAX_BANDWIDTH = 100
     MESSAGE_LENGTH = 8
 
+    # P4-A: Static data cached as class attributes — none of these depend on per-episode
+    # random state; they are pure constants derived from the fixed scenario topology.
+
+    # Network Access Control Lists: which subnets may communicate with which.
+    _SUBNET_NACLS = {
+        SUBNET.RESTRICTED_ZONE_A: {
+            SUBNET.OPERATIONAL_ZONE_A: {"in": "None", "out": "all"},
+            SUBNET.CONTRACTOR_NETWORK: {"in": "all", "out": "all"},
+            SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
+        },
+        SUBNET.OPERATIONAL_ZONE_A: {
+            SUBNET.RESTRICTED_ZONE_A: {"in": "all", "out": "None"}
+        },
+        SUBNET.RESTRICTED_ZONE_B: {
+            SUBNET.OPERATIONAL_ZONE_B: {"in": "None", "out": "all"},
+            SUBNET.CONTRACTOR_NETWORK: {"in": "all", "out": "all"},
+            SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
+        },
+        SUBNET.OPERATIONAL_ZONE_B: {
+            SUBNET.RESTRICTED_ZONE_B: {"in": "all", "out": "None"}
+        },
+        SUBNET.CONTRACTOR_NETWORK: {
+            SUBNET.RESTRICTED_ZONE_A: {"in": "all", "out": "all"},
+            SUBNET.RESTRICTED_ZONE_B: {"in": "all", "out": "all"},
+            SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
+        },
+        SUBNET.PUBLIC_ACCESS_ZONE: {
+            SUBNET.RESTRICTED_ZONE_A: {"in": "all", "out": "all"},
+            SUBNET.RESTRICTED_ZONE_B: {"in": "all", "out": "all"},
+            SUBNET.CONTRACTOR_NETWORK: {"in": "all", "out": "all"},
+            SUBNET.ADMIN_NETWORK: {"in": "all", "out": "all"},
+            SUBNET.OFFICE_NETWORK: {"in": "all", "out": "all"},
+        },
+        SUBNET.ADMIN_NETWORK: {
+            SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
+            SUBNET.OFFICE_NETWORK: {"in": "all", "out": "all"}
+        },
+        SUBNET.OFFICE_NETWORK: {
+            SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
+            SUBNET.ADMIN_NETWORK: {"in": "all", "out": "all"}
+        },
+        SUBNET.INTERNET: {
+            SUBNET.RESTRICTED_ZONE_A: {"in": "all", "out": "all"},
+            SUBNET.OPERATIONAL_ZONE_A: {"in": "all", "out": "all"},
+            SUBNET.RESTRICTED_ZONE_B: {"in": "all", "out": "all"},
+            SUBNET.OPERATIONAL_ZONE_B: {"in": "all", "out": "all"},
+            SUBNET.CONTRACTOR_NETWORK: {"in": "all", "out": "all"},
+            SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
+            SUBNET.ADMIN_NETWORK: {"in": "all", "out": "all"},
+            SUBNET.OFFICE_NETWORK: {"in": "all", "out": "all"}
+        }
+    }
+
+    # Between-subnet host adjacency used by _between_subnet_links().
+    _BETWEEN_SUBNET_LINKS = {
+        "contractor_network_subnet_server_host_0": [
+            "restricted_zone_a_subnet_server_host_0",
+            "restricted_zone_b_subnet_server_host_0",
+            "public_access_zone_subnet_server_host_0",
+        ],
+        "restricted_zone_a_subnet_server_host_0": [
+            "operational_zone_a_subnet_server_host_0",
+            "contractor_network_subnet_server_host_0"
+        ],
+        "operational_zone_a_subnet_server_host_0": [
+            "restricted_zone_a_subnet_server_host_0"
+        ],
+        "restricted_zone_b_subnet_server_host_0": [
+            "operational_zone_b_subnet_server_host_0",
+            "contractor_network_subnet_server_host_0"
+        ],
+        "operational_zone_b_subnet_server_host_0": [
+            "restricted_zone_b_subnet_server_host_0"
+        ],
+        "public_access_zone_subnet_server_host_0": [
+            "admin_network_subnet_server_host_0",
+            "office_network_subnet_server_host_0",
+            "contractor_network_subnet_server_host_0"
+        ],
+        "admin_network_subnet_server_host_0": [
+            "public_access_zone_subnet_server_host_0"
+        ],
+        "office_network_subnet_server_host_0": [
+            "public_access_zone_subnet_server_host_0"
+        ]
+    }
+
+    # Mission-phase comms policies — pure constants.
+    _COMMS_POLICY = [
+        # policy_1 (pre-planning)
+        [
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.CONTRACTOR_NETWORK), (SUBNET.ADMIN_NETWORK, SUBNET.CONTRACTOR_NETWORK), (SUBNET.OFFICE_NETWORK, SUBNET.CONTRACTOR_NETWORK),
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_A), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_A), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_A),
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_B), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_B), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_B),
+            (SUBNET.RESTRICTED_ZONE_A, SUBNET.CONTRACTOR_NETWORK),
+            (SUBNET.OPERATIONAL_ZONE_A, SUBNET.RESTRICTED_ZONE_A),
+            (SUBNET.RESTRICTED_ZONE_B, SUBNET.CONTRACTOR_NETWORK),
+            (SUBNET.RESTRICTED_ZONE_B, SUBNET.RESTRICTED_ZONE_A),
+            (SUBNET.OPERATIONAL_ZONE_B, SUBNET.RESTRICTED_ZONE_B)
+        ],
+        # policy_2 (mission A)
+        [
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.CONTRACTOR_NETWORK), (SUBNET.ADMIN_NETWORK, SUBNET.CONTRACTOR_NETWORK), (SUBNET.OFFICE_NETWORK, SUBNET.CONTRACTOR_NETWORK),
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_A), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_A), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_A),
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_B), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_B), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_B),
+            (SUBNET.RESTRICTED_ZONE_B, SUBNET.CONTRACTOR_NETWORK),
+            (SUBNET.OPERATIONAL_ZONE_B, SUBNET.RESTRICTED_ZONE_B)
+        ],
+        # policy_3 (mission B)
+        [
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.CONTRACTOR_NETWORK), (SUBNET.ADMIN_NETWORK, SUBNET.CONTRACTOR_NETWORK), (SUBNET.OFFICE_NETWORK, SUBNET.CONTRACTOR_NETWORK),
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_A), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_A), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_A),
+            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_B), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_B), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_B),
+            (SUBNET.RESTRICTED_ZONE_A, SUBNET.CONTRACTOR_NETWORK),
+            (SUBNET.OPERATIONAL_ZONE_A, SUBNET.RESTRICTED_ZONE_A)
+        ],
+    ]
+
+    # Action-class lists — references to Python classes, never change.
+    _BLUE_ACTIONS = [AllowTrafficZone, BlockTrafficZone, Monitor, Analyse, Restore, Remove, DeployDecoy, Sleep]
+    _RED_ACTIONS = [
+        DiscoverRemoteSystems, AggressiveServiceDiscovery, StealthServiceDiscovery,
+        ExploitRemoteService, PrivilegeEscalate, DegradeServices, DiscoverDeception,
+        Impact, Withdraw, Sleep
+    ]
+    _GREEN_ACTIONS_DEFAULT = [GreenAccessService, GreenLocalWork, Sleep]
+    _GREEN_ACTIONS_SLEEP = [Sleep]
+
     def __init__(
             self,
             blue_agent_class: Type[BaseAgent] = None,
@@ -114,11 +242,13 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
 
         super().__init__()
         self.background_image = "img/blank.png"
-        self.used_pids: List[int] = []
+        self.used_pids: set = set()  # P4-B: set for O(1) membership tests
         self.blue_agent_class = blue_agent_class
         self.red_agent_class = red_agent_class
         self.green_agent_class = green_agent_class
         self.steps = steps
+        # Cache inspect.getfullargspec result — red_agent_class never changes after construction (P4-C)
+        self._red_agent_argspec = None
 
     def create_scenario(self, np_random: RandomNumberGenerator) -> Scenario:
         """
@@ -182,55 +312,8 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
         network = IPv4Network("10.0.0.0/16")
         network_subnets = list(network.subnets(new_prefix=subnet_prefix))
 
-        # declare subnet NACLs
-        subnet_nacls = {
-            SUBNET.RESTRICTED_ZONE_A: {
-                SUBNET.OPERATIONAL_ZONE_A: {"in": "None", "out": "all"},
-                SUBNET.CONTRACTOR_NETWORK: {"in": "all", "out": "all"},
-                SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
-            },
-            SUBNET.OPERATIONAL_ZONE_A: {
-                SUBNET.RESTRICTED_ZONE_A: {"in": "all", "out": "None"}
-            },
-            SUBNET.RESTRICTED_ZONE_B: {
-                SUBNET.OPERATIONAL_ZONE_B: {"in": "None", "out": "all"},
-                SUBNET.CONTRACTOR_NETWORK: {"in": "all", "out": "all"},
-                SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
-            },
-            SUBNET.OPERATIONAL_ZONE_B: {
-                SUBNET.RESTRICTED_ZONE_B: {"in": "all", "out": "None"}
-            },
-            SUBNET.CONTRACTOR_NETWORK: {
-                SUBNET.RESTRICTED_ZONE_A: {"in": "all", "out": "all"},
-                SUBNET.RESTRICTED_ZONE_B: {"in": "all", "out": "all"},
-                SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
-            },
-            SUBNET.PUBLIC_ACCESS_ZONE: {
-                SUBNET.RESTRICTED_ZONE_A: {"in": "all", "out": "all"},
-                SUBNET.RESTRICTED_ZONE_B: {"in": "all", "out": "all"},
-                SUBNET.CONTRACTOR_NETWORK: {"in": "all", "out": "all"},
-                SUBNET.ADMIN_NETWORK: {"in": "all", "out": "all"},
-                SUBNET.OFFICE_NETWORK: {"in": "all", "out": "all"},
-            },
-            SUBNET.ADMIN_NETWORK: {
-                SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
-                SUBNET.OFFICE_NETWORK: {"in": "all", "out": "all"}
-            },
-            SUBNET.OFFICE_NETWORK: {
-                SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
-                SUBNET.ADMIN_NETWORK: {"in": "all", "out": "all"}
-            },
-            SUBNET.INTERNET: {
-                SUBNET.RESTRICTED_ZONE_A: {"in": "all", "out": "all"},
-                SUBNET.OPERATIONAL_ZONE_A: {"in": "all", "out": "all"},
-                SUBNET.RESTRICTED_ZONE_B: {"in": "all", "out": "all"},
-                SUBNET.OPERATIONAL_ZONE_B: {"in": "all", "out": "all"},
-                SUBNET.CONTRACTOR_NETWORK: {"in": "all", "out": "all"},
-                SUBNET.PUBLIC_ACCESS_ZONE: {"in": "all", "out": "all"},
-                SUBNET.ADMIN_NETWORK: {"in": "all", "out": "all"},
-                SUBNET.OFFICE_NETWORK: {"in": "all", "out": "all"}
-            }
-        }
+        # P4-A: Use cached class-level NACL dict instead of rebuilding each episode.
+        subnet_nacls = self._SUBNET_NACLS
         # Create subnets in a list that can be iterated over
         scenario_subnets = {}
         for subnet_name in SUBNET:
@@ -278,36 +361,8 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
             A list of pairs of subnets that are allowed to communicate with each other during the policy iteration
         """
 
-        policy_1 = [
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.CONTRACTOR_NETWORK), (SUBNET.ADMIN_NETWORK, SUBNET.CONTRACTOR_NETWORK), (SUBNET.OFFICE_NETWORK, SUBNET.CONTRACTOR_NETWORK),
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_A), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_A), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_A),
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_B), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_B), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_B),
-            (SUBNET.RESTRICTED_ZONE_A, SUBNET.CONTRACTOR_NETWORK),
-            (SUBNET.OPERATIONAL_ZONE_A, SUBNET.RESTRICTED_ZONE_A),
-            (SUBNET.RESTRICTED_ZONE_B, SUBNET.CONTRACTOR_NETWORK),
-            (SUBNET.RESTRICTED_ZONE_B, SUBNET.RESTRICTED_ZONE_A),
-            (SUBNET.OPERATIONAL_ZONE_B, SUBNET.RESTRICTED_ZONE_B)
-        ]
-
-        policy_2 = [
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.CONTRACTOR_NETWORK), (SUBNET.ADMIN_NETWORK, SUBNET.CONTRACTOR_NETWORK), (SUBNET.OFFICE_NETWORK, SUBNET.CONTRACTOR_NETWORK),
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_A), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_A), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_A),
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_B), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_B), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_B),
-            (SUBNET.RESTRICTED_ZONE_B, SUBNET.CONTRACTOR_NETWORK),
-            (SUBNET.OPERATIONAL_ZONE_B, SUBNET.RESTRICTED_ZONE_B)
-        ]
-
-        policy_3 = [
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.CONTRACTOR_NETWORK), (SUBNET.ADMIN_NETWORK, SUBNET.CONTRACTOR_NETWORK), (SUBNET.OFFICE_NETWORK, SUBNET.CONTRACTOR_NETWORK),
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_A), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_A), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_A),
-            (SUBNET.PUBLIC_ACCESS_ZONE, SUBNET.RESTRICTED_ZONE_B), (SUBNET.ADMIN_NETWORK, SUBNET.RESTRICTED_ZONE_B), (SUBNET.OFFICE_NETWORK, SUBNET.RESTRICTED_ZONE_B),
-            (SUBNET.RESTRICTED_ZONE_A, SUBNET.CONTRACTOR_NETWORK),
-            (SUBNET.OPERATIONAL_ZONE_A, SUBNET.RESTRICTED_ZONE_A)
-        ]
-
-        comms_policy = [policy_1, policy_2, policy_3]
-
-        return comms_policy
+        # P4-A: Return cached class-level policy instead of rebuilding each episode.
+        return self._COMMS_POLICY
 
     def _generate_hosts(self, subnets: Dict[str, Subnet]) -> Dict[str, Host]:
         """
@@ -428,38 +483,8 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
         links : Dict[str, List[str]]
             hosts that have (directional) links to eachother
         """
-        links = {
-            "contractor_network_subnet_server_host_0": [
-                "restricted_zone_a_subnet_server_host_0",
-                "restricted_zone_b_subnet_server_host_0",
-                "public_access_zone_subnet_server_host_0",
-                ],
-            "restricted_zone_a_subnet_server_host_0": [
-                "operational_zone_a_subnet_server_host_0",
-                "contractor_network_subnet_server_host_0"
-            ],
-            "operational_zone_a_subnet_server_host_0": [
-                "restricted_zone_a_subnet_server_host_0"
-            ],
-            "restricted_zone_b_subnet_server_host_0": [
-                "operational_zone_b_subnet_server_host_0",
-                "contractor_network_subnet_server_host_0"
-            ],
-            "operational_zone_b_subnet_server_host_0": [
-                "restricted_zone_b_subnet_server_host_0"
-            ],
-            "public_access_zone_subnet_server_host_0": [
-                "admin_network_subnet_server_host_0",
-                "office_network_subnet_server_host_0",
-                "contractor_network_subnet_server_host_0"
-            ],
-            "admin_network_subnet_server_host_0": [
-                "public_access_zone_subnet_server_host_0"
-            ],
-            "office_network_subnet_server_host_0": [
-                "public_access_zone_subnet_server_host_0"
-            ]
-        }
+        # P4-A: Use cached class-level adjacency dict instead of rebuilding each call.
+        links = self._BETWEEN_SUBNET_LINKS
         if not hostname in links:
             return None
         info = {}
@@ -573,8 +598,8 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
         """
         while True:
             pid = self.np_random.integers(1000, 10000)  # generate a random 4-digit number
-            if pid not in self.used_pids:  # check if the generated PID is not in the used_pids list
-                self.used_pids.append(pid)
+            if pid not in self.used_pids:  # O(1) set membership test (P4-B)
+                self.used_pids.add(pid)
                 return pid  # if not, return the generated PID
 
     def _generate_linux_host_processes(self, services: Dict[str, Service]) -> List[dict]:
@@ -639,7 +664,7 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
         agents : Dict[str, ScenarioAgent]
             a dict containing the agents of the scenario.
         """
-        blue_actions = [AllowTrafficZone, BlockTrafficZone, Monitor, Analyse, Restore, Remove, DeployDecoy, Sleep]
+        blue_actions = self._BLUE_ACTIONS  # P4-A: class-level constant
         blue_agent_allowed_subnets = [
             [SUBNET.RESTRICTED_ZONE_A.value],
             [SUBNET.OPERATIONAL_ZONE_A.value],
@@ -711,7 +736,7 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
         agents : Dict[str, ScenarioAgent]
             A dict containing all of the agents of the scenario (so far.)
         """
-        green_actions = [GreenAccessService, GreenLocalWork, Sleep]
+        green_actions = self._GREEN_ACTIONS_DEFAULT  # P4-A: class-level constant
         green_agent_count = 0
         for subnet in subnets.values():
             for hostname in subnet.hosts:
@@ -740,7 +765,7 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
                         host_ip = hosts[hostname].interfaces[0].ip_address
                         agent_type = self.green_agent_class(name=agent_name, np_random=self.np_random, own_ip=host_ip)
                     elif self.green_agent_class == SleepAgent:
-                        green_actions = [Sleep]
+                        green_actions = self._GREEN_ACTIONS_SLEEP  # P4-A: class-level constant
                     else:
                         agent_type = self.green_agent_class(agent_name)
                 agents[agent_name] = ScenarioAgent(
@@ -761,11 +786,7 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
             A dict containing all of the agents of the scenario (so far.)
         """
 
-        red_actions = [
-            DiscoverRemoteSystems, AggressiveServiceDiscovery, StealthServiceDiscovery,
-            ExploitRemoteService, PrivilegeEscalate, DegradeServices, DiscoverDeception,
-            Impact, Withdraw, Sleep
-        ]
+        red_actions = self._RED_ACTIONS  # P4-A: class-level constant
         red_agent_allowed_subnets = [
             [SUBNET.CONTRACTOR_NETWORK.value],
             [SUBNET.RESTRICTED_ZONE_A.value],
@@ -804,7 +825,10 @@ class EnterpriseScenarioGenerator(ScenarioGenerator):
             agent_type = self.np_random.choice(red_agent_types)(agent_name)
             default_actions = (RedSessionCheck, {'session': 0, 'agent': agent_name})
             if self.red_agent_class:
-                parameter_list = inspect.getfullargspec(self.red_agent_class).args
+                if self._red_agent_argspec is None:
+                    self._red_agent_argspec = inspect.getfullargspec(self.red_agent_class)
+                argspec = self._red_agent_argspec
+                parameter_list = argspec.args
                 if 'np_random' in parameter_list:
                     if isinstance(self.red_agent_class, FiniteStateRedAgent) or issubclass(self.red_agent_class, FiniteStateRedAgent):
                         agent_subnets = [subnets[sn].cidr for sn in allowed_subnets]

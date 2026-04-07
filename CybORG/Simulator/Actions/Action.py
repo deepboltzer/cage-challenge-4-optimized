@@ -2,9 +2,6 @@
 from ipaddress import IPv4Address, IPv4Network
 from typing import Optional
 
-from networkx import shortest_path, NetworkXNoPath, NodeNotFound
-from networkx.classes.function import nodes, induced_subgraph
-
 from CybORG.Shared import Observation, CybORGLogger
 from CybORG.Simulator.Host import Host
 from CybORG.Simulator.State import State
@@ -88,6 +85,7 @@ class RemoteAction(Action):
 
     @staticmethod
     def remove_blocking_nodes(state:State, src_hostname: str):
+        from networkx.classes.function import nodes, induced_subgraph  # lazy: only at action execution time
         network = state.link_diagram
         all_nodes = nodes(network)
         non_blocking_nodes = []
@@ -97,9 +95,10 @@ class RemoteAction(Action):
         
         return induced_subgraph(state.link_diagram, non_blocking_nodes)
 
-    @staticmethod  
+    @staticmethod
     def get_route(state: State, target: str, source: str, routing: bool = False) -> list:
         """finds the route from one ip_address to another and returns the hostname list along that route"""
+        from networkx import shortest_path, NetworkXNoPath, NodeNotFound  # lazy: only at action execution time
         try:
             path = shortest_path(state.link_diagram, source=source, target=target)
         except NetworkXNoPath:

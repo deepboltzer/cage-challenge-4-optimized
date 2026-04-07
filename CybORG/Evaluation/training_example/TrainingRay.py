@@ -31,9 +31,9 @@ def env_creator_CC4(env_config: dict):
         green_agent_class=EnterpriseGreenAgent,
         red_agent_class=FiniteStateRedAgent,
         #red_agent_class=SleepAgent,
-        steps=100,
+        steps=500,
     )
-    cyborg = CybORG(scenario_generator=sg)
+    cyborg = CybORG(scenario_generator=sg, pool_size=8)
     cyborg = EnterpriseMAE(cyborg)
     return cyborg
 
@@ -58,6 +58,8 @@ algo_config = (
     # .debugging(seed=0, log_level="ERROR")
     .debugging(logger_config={"logdir":"logs/DQN_Complicated_SleepRed", "type":"ray.tune.logger.TBXLogger"})
     .environment(env="CC4")
+    .rollouts(num_rollout_workers=4, num_envs_per_worker=2)
+    .resources(num_cpus_per_worker=1)
     # .training(model={"fcnet_hiddens":[32:32]})``
     .multi_agent(
         policies={
@@ -82,8 +84,8 @@ for i in range(1000):
 #algo.save("experiment1a")
 #output = algo.evaluate()
 
-print(output)
-print(
-    "Avg episode length for trained agent: %.1f"
-    % output["evaluation"]["episode_len_mean"]
-)
+# print(output)
+# print(
+#     "Avg episode length for trained agent: %.1f"
+#     % output["evaluation"]["episode_len_mean"]
+# )

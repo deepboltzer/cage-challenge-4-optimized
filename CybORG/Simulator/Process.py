@@ -114,6 +114,29 @@ class Process(Entity):
             observations.append(obs)
         return observations
 
+    def clone(self) -> 'Process':
+        """Return a direct field-copy of this Process without intermediate dicts.
+
+        Copies all __slots__ fields directly, cloning each NetworkConnection in
+        self.connections via NetworkConnection.clone() to avoid allocating
+        intermediate state dicts.  self.properties (list of str) is
+        shallow-copied because strings are immutable.
+        """
+        new = object.__new__(Process)
+        new.name = self.name
+        new.pid = self.pid
+        new.ppid = self.ppid
+        new.program = self.program
+        new.user = self.user
+        new.path = self.path
+        new.open_ports = self.open_ports  # kept as-is (read-only after init)
+        new.decoy_type = self.decoy_type
+        new.connections = [c.clone() for c in self.connections]
+        new.properties = list(self.properties)
+        new.process_type = self.process_type
+        new.version = self.version
+        return new
+
     def is_using_port(self, port: int) -> bool:
         return any(conn.local_port == port for conn in self.connections)
     

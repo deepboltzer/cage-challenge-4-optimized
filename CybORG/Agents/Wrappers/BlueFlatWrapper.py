@@ -4,10 +4,6 @@ from gymnasium import Space, spaces
 from CybORG import CybORG
 from CybORG.Simulator import State
 from CybORG.Simulator.Actions import Action
-from CybORG.Simulator.Scenarios.EnterpriseScenarioGenerator import (
-    EnterpriseScenarioGenerator,
-)
-
 from typing import Any
 
 import numpy as np
@@ -26,8 +22,8 @@ from CybORG.Agents.Wrappers.BlueFixedActionWrapper import (
 NUM_SUBNETS = 9
 NUM_HQ_SUBNETS = 3
 
-MAX_USER_HOSTS = EnterpriseScenarioGenerator.MAX_USER_HOSTS
-MAX_SERVER_HOSTS = EnterpriseScenarioGenerator.MAX_SERVER_HOSTS
+MAX_USER_HOSTS = 10    # From EnterpriseScenarioGenerator.MAX_USER_HOSTS
+MAX_SERVER_HOSTS = 6   # From EnterpriseScenarioGenerator.MAX_SERVER_HOSTS
 MAX_HOSTS = MAX_USER_HOSTS + MAX_SERVER_HOSTS
 
 
@@ -59,9 +55,13 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
         self.policy = {}
         self._cached_sorted_subnets = None
         self._cached_comms_matrices = {}
+        self._cached_comms_matrices_negated = {}
         self._cached_subnet_hosts = {}
         self._cached_subnet_name_list = None
         self._cached_subnet_name_to_idx = {}
+        self._sorted_agent_names = None
+        # Pre-allocated observation buffers: keyed by agent name, set at first obs call per episode
+        self._obs_buffers: dict = {}
 
     def reset(self, *args, **kwargs) -> tuple[dict[str, Any], dict[str, Any]]:
         """Reset the environment and update the observation space.
@@ -76,6 +76,7 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
             Forwarded from self.env.
         """
         observations, info = super().reset(*args, **kwargs)
+        self._obs_buffers = {}
         self.comms_policies = self._build_comms_policy()
         state = self.env.environment_controller.state
         self._cached_sorted_subnets = sorted(state.subnet_name_to_cidr.items())
@@ -84,9 +85,14 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
             for sn, _ in self._cached_sorted_subnets
         }
         self._cached_comms_matrices = {}
+        self._cached_comms_matrices_negated = {}
         _names, _cidrs = zip(*self._cached_sorted_subnets)
         self._cached_subnet_name_list = [n.lower() for n in _names]
         self._cached_subnet_name_to_idx = {n: i for i, n in enumerate(self._cached_subnet_name_list)}
+        # Cache sorted agent name order — agent names are fixed for the episode (Change 3)
+        self._sorted_agent_names = [
+            agent for agent, _ in sorted(observations.items()) if "blue" in agent
+        ]
         observations = {
             a: self.observation_change(a, observations[a]) for a in self.agents
         }
@@ -133,10 +139,13 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
             actions=actions, messages=messages, **kwargs
         )
 
+        # Use cached sorted agent name order; fall back to sorting if cache is absent (Change 3)
+        agent_order = self._sorted_agent_names if self._sorted_agent_names is not None \
+            else [a for a, _ in sorted(observations.items()) if "blue" in a]
         observations = {
-            agent: self.observation_change(agent, obs)
-            for agent, obs in sorted(observations.items())
-            if "blue" in agent
+            agent: self.observation_change(agent, observations[agent])
+            for agent in agent_order
+            if agent in observations
         }
         return observations, rewards, terminated, truncated, info
 
@@ -184,22 +193,12 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
 
         return short_observation_space, long_observation_space
 
-    def observation_change(self, agent_name: str, observation: dict) -> np.ndarray:
-        """Converts an observation dictionary to a vector of fixed size and ordering.
+    def _build_proto_observation(self, agent_name: str, observation: dict, state) -> np.ndarray:
+        """Build the full observation vector from scratch and return it as float32 ndarray.
 
-        Parameters
-        ----------
-        agent_name : str
-            Agent corresponding to the observation.
-        observation : dict 
-            Observation to convert to a fixed vector.
-
-        Returns
-        -------
-        output : np.ndarray
+        This is called on the first observation for each agent after a reset, both to
+        produce the initial output and to determine the buffer size for subsequent steps.
         """
-        state = self.env.environment_controller.state
-
         proto_observation = []
 
         # Mission Phase
@@ -224,10 +223,11 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
             phase = int(state.mission_phase)
             if phase not in self._cached_comms_matrices:
                 self._cached_comms_matrices[phase] = nx.to_numpy_array(comms_policy, nodelist=subnet_names)
-            comms_matrix = self._cached_comms_matrices[phase]
+                # Cache the negated matrix alongside the un-negated one (Change 2)
+                self._cached_comms_matrices_negated[phase] = np.logical_not(self._cached_comms_matrices[phase])
             subnet_idx = self._cached_subnet_name_to_idx.get(subnet, subnet_names.index(subnet))
-            comms_policy_subvector = comms_matrix[subnet_idx]
-            comms_policy_subvector = np.logical_not(comms_policy_subvector)
+            # Direct lookup into pre-negated cache — no per-call np.logical_not allocation (Change 2)
+            comms_policy_subvector = self._cached_comms_matrices_negated[phase][subnet_idx]
             self.policy[agent_name] = comms_policy
 
             # Process malware events for users, then servers
@@ -237,8 +237,9 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
             connection_subvector = []
             for h in subnet_hosts:
                 if h in state.hosts:
-                    process_subvector.append(0 < len(self._get_procesess(state, h)))
-                    connection_subvector.append(0 < len(self._get_connections(state, h)))
+                    # _get_procesess/_get_connections now return bool — no list alloc (Change 5)
+                    process_subvector.append(self._get_procesess(state, h))
+                    connection_subvector.append(self._get_connections(state, h))
                 else:
                     process_subvector.append(False)
                     connection_subvector.append(False)
@@ -253,7 +254,8 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
                 )
             )
 
-        output = np.array(proto_observation, dtype=np.int64)
+        # float32: values are 0/1 only — lossless, eliminates SB3's silent cast each rollout step (Change 1)
+        output = np.array(proto_observation, dtype=np.float32)
 
         # Messages from other agents
         # This assumes CybORG provides a consistent ordering.
@@ -272,6 +274,102 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
             )
 
         return output
+
+    def observation_change(self, agent_name: str, observation: dict) -> np.ndarray:
+        """Converts an observation dictionary to a vector of fixed size and ordering.
+
+        On the first call for each agent after a reset the observation is built via the
+        normal list-append path.  The resulting length is used to allocate a reusable
+        float32 buffer (``self._obs_buffers[agent_name]``).  On every subsequent call
+        the buffer is filled in-place with a write-cursor and a copy is returned, avoiding
+        per-step Python list growth and ``np.array()`` allocation.
+
+        Parameters
+        ----------
+        agent_name : str
+            Agent corresponding to the observation.
+        observation : dict
+            Observation to convert to a fixed vector.
+
+        Returns
+        -------
+        output : np.ndarray
+        """
+        state = self.env.environment_controller.state
+
+        # --- First call for this agent this episode: build normally, allocate buffer ---
+        if agent_name not in self._obs_buffers:
+            output = self._build_proto_observation(agent_name, observation, state)
+            self._obs_buffers[agent_name] = np.empty(len(output), dtype=np.float32)
+            self._obs_buffers[agent_name][:] = output
+            return output
+
+        # --- Subsequent calls: fill pre-allocated buffer in-place ---
+        buf = self._obs_buffers[agent_name]
+        cursor = 0
+
+        # Useful (sorted) information
+        sorted_subnet_name_to_cidr = self._cached_sorted_subnets if self._cached_sorted_subnets is not None else sorted(state.subnet_name_to_cidr.items())
+        subnet_names = self._cached_subnet_name_list if self._cached_subnet_name_list is not None else [n.lower() for n, _ in sorted_subnet_name_to_cidr]
+        n_subnets = len(subnet_names)
+        hosts = self.hosts(agent_name)
+
+        # Mission Phase (scalar)
+        buf[cursor] = state.mission_phase
+        cursor += 1
+
+        for subnet in self.subnets(agent_name):
+            # One-hot encoded subnet vector (n_subnets booleans)
+            for i, name in enumerate(subnet_names):
+                buf[cursor + i] = subnet == name
+            cursor += n_subnets
+
+            # Blocked subnets (n_subnets booleans)
+            blocked_subnets = state.blocks.get(subnet, [])
+            for i, s in enumerate(subnet_names):
+                buf[cursor + i] = s in blocked_subnets
+            cursor += n_subnets
+
+            # Comms policy row (n_subnets values)
+            comms_policy = self.comms_policies[state.mission_phase]
+            phase = int(state.mission_phase)
+            if phase not in self._cached_comms_matrices:
+                self._cached_comms_matrices[phase] = nx.to_numpy_array(comms_policy, nodelist=subnet_names)
+                self._cached_comms_matrices_negated[phase] = np.logical_not(self._cached_comms_matrices[phase])
+            subnet_idx = self._cached_subnet_name_to_idx.get(subnet, subnet_names.index(subnet))
+            comms_row = self._cached_comms_matrices_negated[phase][subnet_idx]
+            buf[cursor:cursor + n_subnets] = comms_row
+            cursor += n_subnets
+            self.policy[agent_name] = comms_policy
+
+            # Process and connection flags for hosts in this subnet
+            subnet_hosts = self._cached_subnet_hosts.get(subnet, [h for h in hosts if subnet in h and "router" not in h])
+            n_hosts = len(subnet_hosts)
+            for i, h in enumerate(subnet_hosts):
+                if h in state.hosts:
+                    buf[cursor + i] = self._get_procesess(state, h)
+                    buf[cursor + n_hosts + i] = self._get_connections(state, h)
+                else:
+                    buf[cursor + i] = False
+                    buf[cursor + n_hosts + i] = False
+            cursor += 2 * n_hosts
+
+        # Messages from other agents
+        messages = observation.get("message", [EMPTY_MESSAGE] * NUM_MESSAGES)
+        assert len(messages) == NUM_MESSAGES
+        message_subvector = np.concatenate(messages)
+        assert len(message_subvector) == NUM_MESSAGES * MESSAGE_LENGTH
+        msg_len = len(message_subvector)
+        buf[cursor:cursor + msg_len] = message_subvector
+        cursor += msg_len
+
+        # Padding: the buffer was sized from the first call which already included padding,
+        # so the tail bytes (if any) remain zero from np.empty initialisation on first call.
+        # Explicitly zero them each step to guarantee correctness.
+        if cursor < len(buf):
+            buf[cursor:] = 0.0
+
+        return buf.copy()
 
     def _build_comms_policy(self):
         policy_dict = {}
@@ -319,15 +417,17 @@ class BlueFlatWrapper(BlueFixedActionWrapper):
 
         return network
 
-    def _get_procesess(self, state: State, hostname: str):
+    def _get_procesess(self, state: State, hostname: str) -> bool:
+        # Return bool directly — avoids list concat allocation; callers only need truthiness (Change 5)
         observed_proc_events = state.hosts[hostname].events.old_process_creation
         unobserved_proc_events = state.hosts[hostname].events.process_creation
-        return observed_proc_events + unobserved_proc_events
+        return bool(observed_proc_events or unobserved_proc_events)
 
-    def _get_connections(self, state: State, hostname: str):
+    def _get_connections(self, state: State, hostname: str) -> bool:
+        # Return bool directly — avoids list concat allocation; callers only need truthiness (Change 5)
         observed_conn_events = state.hosts[hostname].events.old_network_connections
         unobserved_conn_events = state.hosts[hostname].events.network_connections
-        return observed_conn_events + unobserved_conn_events
+        return bool(observed_conn_events or unobserved_conn_events)
 
     @functools.lru_cache(maxsize=None)
     def observation_space(self, agent_name: str) -> Space:

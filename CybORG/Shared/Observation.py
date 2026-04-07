@@ -33,10 +33,13 @@ class Observation:
         if not isinstance(success, CyEnums.TernaryEnum):
             success = CyEnums.TernaryEnum.parse_bool(success)
         self.data = {"success": success}
-        
+
         if msg is not None:
             self.data['message'] = msg
         self.raw = ''
+        # P4-F: per-host PID index for O(1) process deduplication.
+        # Maps hostid -> {pid -> process_dict} so add_process avoids O(N) scans.
+        self._process_pid_index: dict = {}
 
     def get_dict(self):
         """Returns the data of the observation"""
@@ -112,15 +115,17 @@ class Observation:
             pid = int(pid)
             if pid < 0:
                 raise ValueError
-            processes = self.data[hostid]["Processes"]
-            new_process = next(
-                (p for p in processes if p.get("PID", None) == pid), {}
-            )
-            if new_process:
-                self.data[hostid]["Processes"] = [
-                    p for p in processes if p is not new_process
-                ]
+            # P4-F: O(1) lookup via per-host PID index instead of O(N) linear scan.
+            host_index = self._process_pid_index.setdefault(hostid, {})
+            existing = host_index.get(pid)
+            if existing is not None:
+                # Remove from list in O(N) only when a duplicate is found (rare path).
+                self.data[hostid]["Processes"].remove(existing)
+                new_process = existing
+            else:
+                new_process = {}
             new_process["PID"] = pid
+            # Index entry will be (re-)inserted when we append below.
 
         if parent_pid is not None:
             new_process["PPID"] = int(parent_pid)
@@ -207,9 +212,14 @@ class Observation:
             new_process["Vulnerability"].append(vulnerability)
 
         self.data[hostid]["Processes"].append(new_process)
+        # P4-F: keep PID index in sync so future lookups for this pid are O(1).
+        if "PID" in new_process:
+            self._process_pid_index.setdefault(hostid, {})[new_process["PID"]] = new_process
 
         if self.data[hostid] == {"Processes": [{}]}:
             self.data.pop(hostid)
+            # Clean up index entry for the discarded empty host.
+            self._process_pid_index.pop(hostid, None)
 
     def add_system_info(self,
                         hostid: str = None,

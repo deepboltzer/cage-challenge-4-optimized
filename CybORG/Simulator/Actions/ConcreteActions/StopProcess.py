@@ -44,6 +44,8 @@ class StopProcess(TargetedLocalAction):
         host.sessions[agent].remove(session_id)
         session = state.sessions[agent].pop(session_id)
         state.sessions_count[agent] -= 1
+        # Invalidate the pid->session index: this session is gone and the cache is now stale.
+        state._pid_index_dirty = True
         if not service: return
         session = type(session)(
             hostname=host.hostname,

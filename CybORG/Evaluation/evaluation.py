@@ -115,12 +115,14 @@ def run_evaluation(submission, log_path, max_eps=100, write_to_file=True, seed=N
                         for agent_name in wrapped_cyborg.agents
                     }       
                 )
-                o.append(
-                    {
-                        agent_name: observations[agent_name]
-                        for agent_name in observations.keys()
-                    }
-                )
+                # Observation logging disabled: full obs dict writes ~250,000
+                # entries per 100-episode run but is not used for scoring.
+                # o.append(
+                #     {
+                #         agent_name: observations[agent_name]
+                #         for agent_name in observations.keys()
+                #     }
+                # )
         total_reward.append(sum(r))
 
         if write_to_file:

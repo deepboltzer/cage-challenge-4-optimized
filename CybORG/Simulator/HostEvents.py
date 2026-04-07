@@ -75,3 +75,15 @@ class NetworkConnection():
         if self.transport_protocol:
             obs["transport_protocol"] = self.transport_protocol
         return obs
+
+    def clone(self) -> 'NetworkConnection':
+        """Return a direct field-copy of this NetworkConnection without intermediate dicts."""
+        new = object.__new__(NetworkConnection)
+        new.local_address = self.local_address
+        new.local_port = self.local_port
+        new.remote_address = self.remote_address
+        new.remote_port = self.remote_port
+        new.pid = self.pid
+        new.application_protocol = self.application_protocol
+        new.transport_protocol = self.transport_protocol
+        return new

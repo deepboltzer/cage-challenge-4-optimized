@@ -1,5 +1,3 @@
-from copy import deepcopy
-
 from CybORG.Shared import Observation
 from CybORG.Simulator.Actions import Action
 from CybORG.Shared.Session import VelociraptorServer
@@ -58,8 +56,17 @@ class Monitor(Action):
             for event in network_connections:
                 if event.pid:
                     session.add_sus_pids(hostname=child.hostname, pid=event.pid)
-                obs.add_process(hostid=child.hostname, **{s: getattr(event, s) for s in event.__slots__})
-            host.events.old_network_connections = deepcopy(network_connections)
+                obs.add_process(
+                    hostid=child.hostname,
+                    local_address=event.local_address,
+                    local_port=event.local_port,
+                    remote_address=event.remote_address,
+                    remote_port=event.remote_port,
+                    pid=event.pid,
+                    application_protocol=event.application_protocol,
+                    transport_protocol=event.transport_protocol,
+                )
+            host.events.old_network_connections = list(network_connections)
             network_connections.clear()
 
             processes = host.events.process_creation
@@ -69,7 +76,7 @@ class Monitor(Action):
                 if 'pid' in event:
                     session.add_sus_pids(hostname=child.hostname, pid=event['pid'])
                 obs.add_process(hostid=child.hostname, **event)
-            host.events.old_process_creation = deepcopy(processes)
+            host.events.old_process_creation = list(processes)
             processes.clear()
         return obs
 

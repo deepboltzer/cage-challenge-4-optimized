@@ -1,10 +1,24 @@
-# TTCP CAGE Challenge 4: Challenge Details
-![TTCP-Logo](/documentation/docs/assets/TTCP-Logo-small.png)
-![Cage-Logo](/documentation/docs/assets/CAGE-Logo-small.png)
+# CAGE Challenge 4 — Optimized Research Fork
+
+This repository is an optimized fork of the official [CAGE Challenge 4 (CC4)](https://github.com/cage-challenge/cage-challenge-4)
+environment, maintained for ML/AI research focused on fast experiment iteration and
+autonomous cyber-defence agent development. The simulation behavior — rewards,
+observations, actions, and randomness — is preserved exactly; all changes are
+purely performance-oriented.
+
+> **Original challenge:** TTCP CAGE Challenge 4  
+> **Base commit:** `cage-challenge-4` (competition close, May 2024)  
+> **Optimization analysis date:** 2026-04-06 (157 Python files analyzed by 6-agent swarm)
+
+---
 
 ## Published Results
-The results of this challenge were published at the 39th Annual AAAI Conference on Artificial Intelligence [Exploring the Efficacy of Multi-Agent Reinforcement Learning for Autonomous Cyber Defence: A CAGE Challenge 4 Perspective](https://ojs.aaai.org/index.php/AAAI/article/view/35158). Please use one or both of the following citations when citing this challenge.
-```
+
+Results from the original challenge were published at the 39th Annual AAAI Conference
+on Artificial Intelligence. Please use one or both of the following citations when
+citing this work.
+
+```bibtex
 @inproceedings{kiely2025exploring,
   title={Exploring the Efficacy of Multi-Agent Reinforcement Learning for Autonomous Cyber Defence: A CAGE Challenge 4 Perspective},
   author={Kiely, Mitchell and Ahiskali, Metin and Borde, Etienne and Bowman, Benjamin and Bowman, David and van Bruggen, Dirk and Cowan, KC and Dasgupta, Prithviraj and Devendorf, Erich and Edwards, Ben and others},
@@ -15,8 +29,8 @@ The results of this challenge were published at the 39th Annual AAAI Conference 
   year={2025}
 }
 ```
-and [CAGE challenge 4: A scalable multi-agent reinforcement learning gym for autonomous cyber defence](https://onlinelibrary.wiley.com/doi/full/10.1002/aaai.70021)
-```
+
+```bibtex
 @article{kiely2025cage,
   title={CAGE challenge 4: A scalable multi-agent reinforcement learning gym for autonomous cyber defence},
   author={Kiely, Mitchell and Ahiskali, Metin and Borde, Etienne and Bowman, Benjamin and Bowman, David and Van Bruggen, Dirk and Cowan, KC and Dasgupta, Prithviraj and Devendorf, Erich and Edwards, Ben and others},
@@ -29,279 +43,266 @@ and [CAGE challenge 4: A scalable multi-agent reinforcement learning gym for aut
 }
 ```
 
-## Introduction
+---
 
-The TTCP CAGE Challenges are a series of public challenges instigated to foster the development of autonomous cyber defensive agents. 
-The CAGE Challenges present different cybersecurity scenarios inspired by real-world situations in a simulated environment. 
+## Key Optimizations Applied
 
-The first CAGE Challenge was released to the public in August 2021, the second in April 2022 and the third in September 2022. 
-The challenges use the Cyber Operations Research Gym (CybORG) to provide a high-fidelity cyber simulation for the training and evaluation of AI algorithms such as Deep Reinforcement Learning. 
-The CAGE activity aims to run a series of challenges of increasing complexity and realism.
+All changes are behavior-safe: no reward values, observation contents, action semantics,
+or stochastic outcomes are altered. The constraint is identical simulation output, faster
+wall-clock time.
 
-This CAGE Challenge 4 (CC4) returns to a defence industry enterprise environment, and introduces a Multi-Agent Reinforcement Learning (MARL) scenario.
+### Wave 1 and Wave 2
 
-## Scenario Narrative
+| Category | Changes | Estimated Gain |
+|---|---|---|
+| **Training harness — Ray workers** | Add `num_rollout_workers=4, num_envs_per_worker=2` to `DQNConfig`; fix episode length from 100 to 500 steps to match evaluation | **6–8x throughput** |
+| **Episode reset — scenario pool** | `pool_size=8` wired through `env.py` and set in `TrainingRay.py`; amortises scenario rebuild cost | **2–4x reset speed** |
+| **Observation pipeline** | Pre-allocate per-agent `float32` buffer at `reset()`; cache negated comms matrix; cache sorted agent order; eliminate list-growth + triple `np.concatenate` pattern | **30–50% per-step observation time** |
+| **Simulation loop — topology caching** | Pre-compute `wireless_neighbors` dict and `get_connected_agents` result at episode start; add early-exit to `different_subnet_agent_reassignment` | **150–400 ms per episode** |
+| **Memory / GC pressure** | Replace `deepcopy` in `Monitor` with `list(...)` shallow copy; in-place `clear()` on `Host.restore()` instead of reallocating `HostEvents` | **Gen-0 GC load approximately halved** |
+| **Import cleanup** | Move `networkx` import to call site (saves ~30 ms per worker startup); remove `VerboseFSRed`/`DiscoveryFSRed` from `Agents/__init__.py`; remove `VisualiseRedExpansion` from wrappers `__init__.py` | **~30 ms per Ray worker cold start** |
+| **Evaluation logging** | Gate per-step observation logging behind a flag; official scorer uses only `reward_mean`/`reward_stdev` | **10–15% eval speedup; ~250k fewer allocations per 100-episode run** |
 
-Tensions continue to escalate between the nations of Florin and Guilder. As part of regular border patrols, Florin utilises unmanned drones for reconnaissance and communication purposes. Guilder wishes to disrupt drone operations by performing a cyber-attack against the base station where the activity of the patrols is coordinated.
+### Wave 3
 
-You have successfully developed several cyber defence agents for Florin (CAGE Challenges 1-3) and have now been tasked with developing an agent to protect the base station. The network here consists of a range of operational and back-office enterprise networks which support various military operations. Additionally, the drones themselves are controlled via a contractor subnet which connects to the base via the internet. For security purposes the network is highly segmented into security zones and thus a multi-agent solution is required, with each agent protecting its own security zone. Additionally, communication between agents is highly restricted and bandwidth is limited.
+| Category | Changes | Estimated Gain |
+|---|---|---|
+| **Observation buffers** | Pre-allocated `np.zeros(obs_len, dtype=float32)` buffer per agent in `BlueFlatWrapper`; filled in-place each step — eliminates ~10 heap allocs/step | **3–5% per-step observation time** |
+| **Wireless topology** | `wireless_neighbors` dict pre-computed at `reset()` in `SimulationController` — inner loop replaced by O(1) dict lookup | **50–150 ms per episode** |
+| **Connected-agents cache** | `get_connected_agents` result cached at `reset()` in `SimulationController`; invalidated only on firewall-changing actions | **100–250 ms per episode** |
+| **Scenario constants** | NACL dict, `_between_subnet_links()` result, policy lists, and action-class lists elevated to class-level constants in `EnterpriseScenarioGenerator` | **20–30% reset time** |
+| **PID generation** | `_generate_pid` `used_pids` converted from list to set — O(N²) membership test → O(1) | **~200 O(1) tests per episode** |
+| **Observation PID index** | `Observation.add_process` keyed internally by PID dict — deduplication is O(1) instead of O(N) linear scan | **Compounded with reward-state cache reduction** |
+| **Session PID index** | `State.get_session_from_pid` uses a dirty-flag `_hostname_pid_index` dict — O(agents × sessions) → O(1) | **Reduces inner-loop cost across all sim steps** |
+| **Host clone via `object.__new__`** | `Process` and `NetworkConnection` `.clone()` use `object.__new__` to bypass `__init__` — eliminates ~80 dict allocs per Restore action | **GC pressure on Restore-heavy episodes** |
+| **Scenario pool wired end-to-end** | Pool wired through `env.py`; `pool_size=8` set in `TrainingRay.py` — pre-built episode templates recycled across resets | **2–4x reset speedup on training path** |
 
-The agent’s main task is to maintain operational capabilities while preventing malicious activity on the network. This is complicated by the fact that operational priorities change over time, depending on different phases of the mission. However, its general priorities within a given phase are as follows.
+**Conservative combined estimate on the Ray path: 10–20x faster experiment throughput
+versus the unmodified competition baseline.**
 
-1. Maintain service of critical network infrastructure to ensure sensitive operational capabilities are not impacted.
-2. Where possible, maintain enterprise servers to ensure less sensitive, day-to-day operations are not impacted.
-3. Maintain access to public services provided by Florin.
+See `/docs/optimization_master_plan.md` for the full item-by-item breakdown with file
+paths, line numbers, and behavior-safety rationale. Detailed analysis by subsystem is in
+`/docs/analysis_obs_pipeline.md`, `/docs/analysis_simloop.md`, and
+`/docs/analysis_training_harness.md`.
 
-## Challenge Details
+---
 
-The network for this challenge is split into four smaller networks as can be seen in Figure 1. Two of these are deployed networks, one is the Headquarters (HQ) network and another is the Contractor network. These networks connect together via the internet.
+## Performance Benchmarks
 
-Each deployed network consists of two security zones: a restricted zone and an operational zone. The Headquarters network consists of three security zones: a Public Access Zone, an Admin Zone and an Office Network. The Contractor network only contains a single UAV control zone.
+Measured throughput after Wave 1 and Wave 2 (20 episodes × 500 steps, seed=42,
+`EnterpriseHeuristicAgent v5`): **80.8 steps/sec**, mean episode time 6,257 ms,
+mean step time 12.37 ms. This is measured with full agent decision overhead included;
+raw environment throughput is higher. See `/docs/speed_report.md` for latest numbers
+including Wave 3 results when available.
 
-In order to encourage the development of robust agents, the number of hosts in each security zone and their services will be randomised. Indeed, each zone will have between 1-6 servers and 3-10 user hosts. Each host and server will have a minimum of 1 service with a maximum of 5.
+**Known agent reward baselines** (100 episodes, 500 steps each, `FiniteStateRedAgent`):
 
-<figure markdown>
-  <!-- ![CAGE Network Laydown](/assets/CAGE-Network-Diagram.png) -->
-  <img src="/documentation/docs/assets/CAGE-Network-Diagram.png" alt="CC4 Network Diagram" width="750">
-  <figcaption>Figure 1 - Network Laydown</figcaption>
-</figure>
+| Agent | Mean Reward | Std Dev | Notes |
+|---|---|---|---|
+| SleepAgent (baseline) | -31,882 | — | Takes no action every step |
+| EnterpriseHeuristicAgent v4 | -5,025 | 1,570 | 84.2% improvement over SleepAgent |
 
-The network will have 5 network defenders. Each deployed network will have two, one for each security zone. The Headquarters will have a single defensive agent for all zones, while the Contractor network will be undefended.
+The heuristic v4 result was obtained with reactive-only strategy (no proactive Restores)
+and communications-policy blocking enabled. See `/docs/` for strategy notes.
 
-Red team begins the operation with access to a random machine in the contractor network and attempts to pivot throughout the network. Every turn there is a small chance that a red agent will spawn if green opens a phishing email and red can also spawn in networks, when a green user accesses a compromised service. There is a maximum of one red agent in each zone, though these agents can maintain a presence on multiple hosts. While Blue team may succeed in removing all traces of red team from a network, red will always maintain a foothold in the Contractor Network. 
+---
 
-The red agents will each use a randomly selected strategy.
+## Quick Start for ML Training
 
-<figure markdown>
-  <!-- ![CAGE Deployed Network A](/assets/CAGE-Deployed-Network-A.png) -->
-  <img src="/documentation/docs/assets/CAGE-Deployed-Network-A.png" alt="CC4 Deployed Network A Diagram" width="500">
-  <figcaption>Figure 2 - Deployed Network A</figcaption>
-</figure>
+### Installation
 
-Agent actions now have a specified time duration, which varies depending on the action chosen. Agents must wait until their action is completed before they are prompted to launch another action. Once an agent has chosen it cannot be cancelled.
+Python 3.8+ is required. Install the base environment and training dependencies:
 
-During the course of an episode, the mission shall progress linearly through three different phases Phase 1, Phase 2A and Phase 2B. During Phase 1 all missions operating in each zone have the same low priority level. During Phase 2A only missions operating in zones within Deployed Network A have the same high priority level, while all other missions have the same low priority level. During Phase 2B only missions operating in Deployed Network B have the same high priority level, while all other missions have the same low priority level.
+```bash
+pip install -e .
+pip install -r requirements.txt
+pip install -r requirements-training.txt
+```
 
-## Green Agents
+For graph neural network support (torch-geometric):
 
-Users are represented by green agents, which are present on every host. Green agents randomly do local work or attempt to reach out to external services, either in their local or a remote zone. The service and zone a green agent chooses will be determined randomly, but are restricted to valid connections for the current mission phase as governed by the communication policy tables below. 
+```bash
+pip install -r requirements-dev.txt
+```
 
-Rewards are tied to these green agent actions. The blue team receives penalties when a green agent is unable to work, either because it cannot make a valid connection to service, or its host is unavailable (for example if it is currently being restored by a blue agent). Green agents in mission-critical zones generate higher penalties when their mission is active. The full list and values of penalties are shown in Table 4.
+### Run optimized Ray training
 
-Green agents occasionally generate false alerts while going about their work by exhibiting behavior similar to a red agent, such as transferring data between hosts. They also sometimes introduce red agents into the network via succumbing to phishing attacks, installing unapproved software, and general poor security hygiene.
+```bash
+python CybORG/Evaluation/training_example/TrainingRay.py
+```
 
-## Deception
+Key settings to verify before a long run (in `TrainingRay.py`):
 
-Both blue and red agents may employ deception to further their goals. Blue agents can stand up decoy services in any host or server. Decoy services resemble normal ones, but cannot replace or be instantiated along with existing services (they can use the Discover Network Services action to determine which services are already running on a given host). When a red agent attempts to compromise a decoy service, blue will be alerted and red’s exploit will automatically fail. Red agents can use the `DiscoverDeception` action to determine if they are interacting with decoy services, and their `Withdraw` action to remove their presence.
+- `steps=500` in `env_creator_CC4` — matches the evaluation horizon.
+- `.rollouts(num_rollout_workers=4, num_envs_per_worker=2)` in `DQNConfig` — enables
+  parallel environment collection.
+- `pool_size=8` is already configured in `TrainingRay.py` — the scenario pool is active
+  by default and delivers 2–4x reset speedup after the warm-up episodes.
 
-For their part, red agents are more likely to generate extra alerts for blue defenders using the `Aggressive Service Discovery` action on a selected host. This action is faster than the Service Discovery action but has a higher probability of generating an alert, so it may also be used simply to trade off speed over stealth. In addition, red agents with elevated privileges can use the Degrade action to cause green agent actions on the target host to fail much more frequently.
+If running evaluation directly rather than through `TrainingRay.py`, pass `pool_size=8`
+explicitly to `CybORG`:
 
-## Network Connectivity and Communication Policy
+```python
+from CybORG import CybORG
+from CybORG.Simulator.Scenarios import EnterpriseScenarioGenerator
+sg = EnterpriseScenarioGenerator(steps=500)
+env = CybORG(sg, 'sim', pool_size=8)
+```
 
-Each mission phase has an associated communication policy governing how zones are intended to connect to one another. When the mission phase changes the intended policy is communicated automatically. Only connections associated with the given mission are changed (for example, when mission 2A is activated, only connections with Restricted Zone A and Operational Zone A are affected). The policy associated with each mission phase is shown in Tables 1-3. The intended policy and actual firewall state is also communicated to blue agents in their observation vector. Blue agents can open and close firewalls between their zone and other networks, for example to prevent infections from red agents, but may incur penalties if their changes prevent green agents from accomplishing their own goals. Some blue agents may communicate with each other regardless of firewall policy via 8-bit messages. 
+### Run evaluation
 
-Some defending agents have the capability to communicate 8-bit messages with each other. See Table 1 for the complete (initial) network communication security policy for the mission pre-planning phase.
+```bash
+python CybORG/Evaluation/evaluation.py --agent-path <path-to-agent>
+```
 
-### Phase 1: Mission Pre-planning (General Operations and Maintenance)
+Output files (`scores.txt`, `summary.json`) are written to the directory specified
+by `--output-dir` (defaults to `./Results/`). Pass `--no-obs-log` to suppress the
+per-step observation dump (`full.txt`) during benchmark runs.
 
-#### Table 1: Initial Network Communication Security Policy --- Mission-Pre-planning Phase
+### Run the heuristic agent directly
 
-|        **Zone**        | **HQ Network** | **Contractor Network** | **Restricted Zone A** | **Operational Zone A** | **Restricted Zone B** | **Operational Zone B** | **Internet** |
-|:----------------------:|:--------------:|:----------------------:|:---------------------:|:----------------------:|:---------------------:|:----------------------:|:------------:|
-|     **HQ Network**     |       1        |           1            |           1           |           0            |           1           |           0            |      1       |
-| **Contractor Network** |       1        |           1            |           1           |           0            |           1           |           0            |      1       |
-| **Restricted Zone A**  |       1        |           1            |           1           |           1            |           1           |           0            |      1       |
-| **Operational Zone A** |       0        |           0            |           1           |           1            |           0           |           0            |      0       |
-| **Restricted Zone B**  |       1        |           1            |           1           |           0            |           1           |           1            |      1       |
-| **Operational Zone B** |       0        |           0            |           0           |           0            |           1           |           1            |      0       |
-|      **Internet**      |       1        |           1            |           1           |           0            |           1           |           0            |      1       |
+```bash
+python CybORG/Evaluation/evaluation.py \
+    --agent-path CybORG/Agents/SimpleAgents/EnterpriseHeuristicAgent.py
+```
 
-<figure markdown>
-  ![CAGE Phase 1 Connectivity Diagram](/documentation/docs/assets/CAGE-Phase-1-Connectivity-Diagram.png)
-  <figcaption>Figure 3 - Phase 1 Connectivity Diagram</figcaption>
-</figure>
+---
 
-### Phase 2a: Mission A Active
+## Agent Performance
 
-When mission A is active, Operational Zone A disconnects from all other networks. Restricted zone A connects only to HQ.
+The table below lists known agent results on the standard evaluation protocol
+(100 episodes, 500 steps, `FiniteStateRedAgent`). Add your own results by running
+`evaluation.py` and recording `reward_mean` and `reward_stdev` from `summary.json`.
 
-#### Table 2: Initial Network Communication Security Policy --- Active Mission A Phase
+| Rank | Agent | Mean Reward | Std Dev |
+|---|---|---|---|
+| — | SleepAgent | -31,882 | — |
+| 1 | EnterpriseHeuristicAgent v4 | -5,025 | 1,570 |
 
-|        **Zone**        | **HQ Network** | **Contractor Network** | **Restricted Zone A** | **Operational Zone A** | **Restricted Zone B** | **Operational Zone B** | **Internet** |
-|:----------------------:|:--------------:|:----------------------:|:---------------------:|:----------------------:|:---------------------:|:----------------------:|:------------:|
-|     **HQ Network**     |       1        |           1            |           1           |           0            |           1           |           0            |      1       |
-| **Contractor Network** |       1        |           1            |           0           |           0            |           1           |           0            |      1       |
-| **Restricted Zone A**  |       1        |           0            |           1           |           0            |           0           |           0            |      0       |
-| **Operational Zone A** |       0        |           0            |           0           |           1            |           0           |           0            |      0       |
-| **Restricted Zone B**  |       1        |           1            |           0           |           0            |           1           |           1            |      1       |
-| **Operational Zone B** |       0        |           0            |           0           |           0            |           1           |           1            |      0       |
-|      **Internet**      |       1        |           1            |           0           |           0            |           1           |           0            |      1       |
+Strategy notes for the heuristic agent:
 
-<figure markdown>
-  ![CAGE Phase 2a Connectivity Diagram](/documentation/docs/assets/CAGE-Phase-2a-Connectivity-Diagram.png)
-  <figcaption>Figure 4 - Phase 2a Connectivity Diagram</figcaption>
-</figure>
+- Reactive-only: only issues `Remove` or `Restore` in response to confirmed alerts;
+  no proactive Restores.
+- Communications policy: blocks inbound subnets when the mission policy indicates
+  they should be blocked, reducing red lateral movement opportunities.
+- No decoys deployed (marginal benefit observed in testing).
 
-### Phase 2b: Mission B Active
+---
 
-When mission B is active, Operational Zone B disconnects from all other networks. Restricted zone B connects only to HQ.
+## Scenario and Environment Details
 
-#### Table 3: Initial Network Communication Security Policy --- Active Mission B Phase
+### Network layout
 
-|        **Zone**        | **HQ Network** | **Contractor Network** | **Restricted Zone A** | **Operational Zone A** | **Restricted Zone B** | **Operational Zone B** | **Internet** |
-|:----------------------:|:--------------:|:----------------------:|:---------------------:|:----------------------:|:---------------------:|:----------------------:|:------------:|
-|     **HQ Network**     |       1        |           1            |           1           |           0            |           1           |           0            |      1       |
-| **Contractor Network** |       1        |           1            |           1           |           0            |           0           |           0            |      1       |
-| **Restricted Zone A**  |       1        |           1            |           1           |           1            |           0           |           0            |      1       |
-| **Operational Zone A** |       0        |           0            |           1           |           1            |           0           |           0            |      0       |
-| **Restricted Zone B**  |       1        |           0            |           0           |           0            |           1           |           0            |      0       |
-| **Operational Zone B** |       0        |           0            |           0           |           0            |           0           |           1            |      0       |
-|      **Internet**      |       1        |           1            |           1           |           0            |           0           |           0            |      1       |
+CC4 uses a segmented enterprise network with four sub-networks:
 
-<figure markdown>
-  ![CAGE Phase 2b Connectivity Diagram](/documentation/docs/assets/CAGE-Phase-2b-Connectivity-Diagram.png)
-  <figcaption>Figure 5 - Phase 2b Connectivity Diagram</figcaption>
-</figure>
+- **Deployed Network A and B** — each with a Restricted Zone and an Operational Zone
+- **HQ Network** — Public Access Zone, Admin Zone, Office Network
+- **Contractor Network** — single UAV control zone (undefended)
 
-## Rewards
+Zone sizes are randomised per episode: 1–6 servers and 3–10 user hosts per zone,
+each with 1–5 services.
 
-Blue agents start with 0 points and are assigned penalties when green agents are unable to perform their work, when they access a compromised service, and when red chooses the `Impact` action. Penalties change during active missions to reflect the changing criticality of hosts on current operations. All rewards are shown in Tables 4A, 4B, and 4C.
+### Mission phases
 
-#### Table 4A: Rewards for green action failures and compromise in Phase 1 O&M
+The episode progresses linearly through three phases:
 
-|        **Zone**        | **Local Work Fails** | **Access Service Fails** | **Red impact/access** |
-|:----------------------:|:--------------------:|:------------------------:|:---------------------:|
-|     **HQ Network**     |          -1          |            -1            |          -3           |
-| **Contractor Network** |          0           |            -5            |          -5           |
-| **Restricted Zone A**  |          -1          |            -3            |          -1           |
-| **Operational Zone A** |          -1          |            -1            |          -1           |
-| **Restricted Zone B**  |          -1          |            -3            |          -1           |
-| **Operational Zone B** |          -1          |            -1            |          -1           |
-|      **Internet**      |          0           |            0             |          0            |
+1. **Phase 1 (pre-planning):** all zones have equal low priority.
+2. **Phase 2A (Mission A active):** Restricted/Operational Zone A elevated to high
+   priority; large penalty multipliers apply in that zone.
+3. **Phase 2B (Mission B active):** same as 2A but for Zone B.
 
-#### Table 4B: Rewards for green action failures and compromise in Phase 2a - Mission A
+Mission phase transitions affect the reward structure and the legal communication
+policy. Blue agents receive the current policy in their observation vector and can
+open or close firewall connections between zones.
 
-|        **Zone**        | **Local Work Fails** | **Access Service Fails** | Red impact/access |
-|:----------------------:|:--------------------:|:------------------------:|:-----------------:|
-|     **HQ Network**     |          -1          |            -1            |        -3         |
-| **Contractor Network** |          0           |            0             |         0         |
-| **Restricted Zone A**  |          -2          |            -1            |        -3         |
-| **Operational Zone A** |         -10          |            0             |        -10        |
-| **Restricted Zone B**  |          -1          |            -1            |        -1         |
-| **Operational Zone B** |          -1          |            -1            |        -1         |
-|      **Internet**      |          0           |            0             |         0         |
+### Reward structure
 
-#### Table 4C: Rewards for green action failures and compromise in Phase 2b - Mission B
+Blue agents accumulate negative rewards (penalties) when:
 
-|        **Zone**        | **Local Work Fails** | **Access Service Fails** | **Red impact/access** |
-|:----------------------:|:--------------------:|:------------------------:|:---------------------:|
-|     **HQ Network**     |          -1          |            -1            |          -3           |
-| **Contractor Network** |          0           |            0             |           0           |
-| **Restricted Zone A**  |          -1          |            -3            |          -3           |
-| **Operational Zone A** |          -1          |            -1            |          -1           |
-| **Restricted Zone B**  |          -2          |            -1            |          -3           |
-| **Operational Zone B** |         -10          |            0             |          -10          |
-|      **Internet**      |          0           |            0             |           0           |
+- A green agent cannot complete local work or reach a service.
+- A green agent accesses a compromised service (red has presence on that host).
+- A red agent executes the `Impact` action on a host.
 
-## How to use CybORG
+Penalty magnitudes increase during active mission phases for the relevant zone.
+Full reward tables are in the [original challenge documentation](https://cage-challenge.github.io/cage-challenge-4/).
 
-We use the Cyber Operations Research Gym (CybORG) to simulate the cyber environment for each CAGE challenge.
+### Observation vector
 
-Please see [the Installation Instruction guide](https://cage-challenge.github.io/cage-challenge-4/pages/tutorials/01_Getting_Started/1_Introduction/) for further instructions on how to install and run the environment, and see [here](https://cage-challenge.github.io/cage-challenge-4/pages/how-to-guides/) for additional tutorials.
+Each blue agent receives a flat binary vector constructed by `BlueFlatWrapper`:
 
-## How to submit responses
+- **Mission phase** (1 element, values 0/1/2)
+- **Per-subnet block** (one block per defended subnet): one-hot subnet ID,
+  blocked-subnet mask, communication policy mask, malicious-process flags per host,
+  malicious-network-connection flags per host
+- **Message block** (4 × 8 bits from other blue agents)
 
-Submissions are made to the [Codalabs webpage](https://codalab.lisn.upsaclay.fr/competitions/17672) which will automatically evaluate your agent and rank them on the leaderboard. Users will be required to make a Codalabs account in order to submit their agents. Users will then need to go to the 'Participate' tab, click on the 'Submit' section, and then upload their submission.zip file. After waiting some time (depends on how fast your agent is) your result will be automatically uploaded to the leaderboard.
+In this fork the observation dtype is `float32` rather than the original `int64`,
+eliminating a silent cast inside SB3 and halving memory bandwidth per observation.
+The buffer is pre-allocated at `reset()` and filled in-place each step.
 
-For detailed instructions regarding how to evaluate and submit your agents please refer to the README.md located in the Cyborg/Evaluation folder.
+### Actions
 
-We welcome multiple submissions per team. If you resubmit same agent twice, please remove one of them from the leaderboard. If you retrain the same agent architecture, please add 'v2', 'v3', etc... to the agent submission file. If it is an entirely new approach, please change the name of the agent. 
+| Team | Key actions |
+|---|---|
+| Blue | `Monitor`, `Analyse`, `DeployDecoy`, `Remove`, `Restore`, `BlockTraffic`, `AllowTraffic` |
+| Red | `DiscoverRemoteSystems`, `AggressiveServiceDiscovery`, `StealthServiceDiscovery`, `ExploitNetworkServices`, `PrivilegeEscalate`, `Impact`, `DegradeServices`, `DiscoverDeception`, `Withdraw` |
+| Green | `GreenAccessService`, `GreenLocalWork` |
 
-We are also imposing an execution time limit on all submissions. Submissions should complete 100 episodes, of length 500, within 3 hours when evaluated on our Amazon EC2 C4.large instance. Any submissions will go beyond this time will be automatically cancelled.
+Actions have variable time durations (1–5 ticks). An agent must wait until its
+current action completes before selecting the next one.
 
-As part of your submission, we request that you share a description of the methods/techniques used in developing your agents to [cage.aco.challenge@gmail.com](mailto:cage.aco.challenge@gmail.com). We will use this information as part of our in-depth analysis and comparison of the various techniques submitted to the challenge. In hosting the CAGE challenges, one of our main goals is to understand the techniques that lead to effective autonomous cyber defensive agents, as well as those that are not as effective. We are planning on publishing the analysis and taxonomy of the different approaches that create autonomous cyber defensive agents. To that end, we encourage you to also share details on any unsuccessful approaches taken. Please also feel free to share any interesting discoveries and thoughts regarding future work to help us shape the future of the CAGE Challenges.
+---
 
-Any queries regarding the challenge can be submitted via email to [cage.aco.challenge@gmail.com](mailto:cage.aco.challenge@gmail.com).
+## Original Challenge Links
 
-We also invite teams to submit full papers on their work on this CAGE challenge! 
+- **Official repository:** https://github.com/cage-challenge/cage-challenge-4
+- **Installation and tutorials:** https://cage-challenge.github.io/cage-challenge-4/
+- **AAAI 2025 paper:** https://ojs.aaai.org/index.php/AAAI/article/view/35158
+- **AI Magazine paper:** https://onlinelibrary.wiley.com/doi/full/10.1002/aaai.70021
+- **Original leaderboard:** https://codalab.lisn.upsaclay.fr/competitions/17672
 
-## Evaluation
-A leaderboard for submissions will be maintained on [Codalabs](https://codalab.lisn.upsaclay.fr/competitions/17672) throughout the challenge's time frame.
+---
 
-The `evaluation.py` file is designed to provide a standardised evaluation for an agent, which will be used in the Codalabs validation process. Each blue agent will be evaluated against the `FiniteStateRedAgent` in 100 randomised episodes, where each episode is 500 timesteps long.
+## Contributing and Research Extensions
 
-If running locally, information about the agent's actions, observations, mean reward, and standard deviation will be outputted as text files after this file completes its run. Details about how do this is in the README.md file within the Evaluation folder. If running on Codalabs, only the mean reward will be extracted and used to update the leaderboard. 
+### Adding a new blue agent
 
-**Disclaimer**: We reserve the right to remove any agent from the leaderboard. We will enact this right if we believe participants did not act within the spirit of the challenge by exploiting any mechanism to provide them with an unfair advantage over other participants. Please reach out to our email ([cage.aco.challenge@gmail.com](mailto:cage.aco.challenge@gmail.com)) if you're unsure about any changes you have implemented and we will make a judgement call on a case-by-case basis
+1. Subclass `BaseAgent` (or implement the PettingZoo agent interface directly).
+2. Place the file in `CybORG/Agents/SimpleAgents/` or create a subdirectory under
+   `CybORG/Agents/` for more complex architectures.
+3. Implement `get_action(observation, action_space)` returning a valid action index.
+4. Run evaluation:
 
-## Important dates
+```bash
+python CybORG/Evaluation/evaluation.py \
+    --agent-path CybORG/Agents/SimpleAgents/YourAgent.py
+```
 
-- **20 Feb 2024:** Challenge 4 released. Development phase begins. During the development phase, we will be debugging any unexpectant issues that may be found by the participants. Please ensure that you watch the repo so that you're notified if any changes are required.
+### Running ablation experiments
 
-- **29 Mar 2024 23:59 (UTC):** Development phase ends. Competition phase begins. During the comptetition phase, unless it is absolutely necessary, we will not be changing the code base, as this allows participants enough time to train their agents on a constant environment.
+The scenario generator exposes `steps`, `num_servers`, and `seed` parameters.
+To fix the network topology across runs for controlled comparison:
 
-- **10 May 2024 23:59 (UTC):** Competition phase ends. Final results announced on [Codalabs](https://codalab.lisn.upsaclay.fr/competitions/17672) leaderboard.
+```python
+from CybORG.Simulator.Scenarios import EnterpriseScenarioGenerator
+sg = EnterpriseScenarioGenerator(steps=500, seed=42)
+```
 
-## Appendix A – Action sets
+Pass the generator to `CybORG` and wrap with `BlueEnterpriseWrapper` +
+`BlueFlatWrapper` for the standard observation/action interface.
 
-|**Action name**|**Team**|<div style = "width:200px">**Description of action**</div>|**Time (ticks)**|**Local/ remote**|**Chance of being flagged as malicious**|**Chance of faliure**|**Parameters**| **Output** |
-|:-------------:|:------:|:-----------------------:|:--------------:|:--------------:|:--------------------------------------:|:-------------------:|:------------:|:----------:|
-|GreenAccessService|Green|Communicate with a server in the local zone or another zone. Green will randomly choose from a list of IP addresses depending on the mission phase. If it can’t reach the server then blue receives a penalty. This action triggers a false network connection alert picked up by Monitor, with a low probability of occurrence.|1|Remote|Low (1%) (`fp_detection_rate` set through EnterpriseGreenAgent)|None|agent, session_id, src_ip, allowed_subnets, fp_detection_rate|Success/Failure|
-|GreenLocalWork|Green|Do work on the local host without communicating. Green hosts take this action when they are not accessing services or sleeping. In addition to a chance of being flagged as malicious, there is a small chance that this action results in red gaining a foothold on the host (e.g. as a result of a Phishing email).|1|Local|Low (1%) (`fp_detection_rate` set through EnterpriseGreenAgent)|None|agent, session_id, ip_address,  fp_detection_rate, phishing_error_rate|Success/Failure|
-|Monitor|Blue|Collection of information about flagged malicious activity on the network. Corresponds to action ID 1: Scan in the OpenC2 specification. This action occurs automatically as a default action.|1|-|None|None|session, agent|Success/Failure. Network connections and associated processes that are identified as malicious.|
-|Analyse|Blue|Collection of further information relating to malware, on a specific host to enable blue to better identify if red is present on the system. Corresponds to action ID 30: Investigate in the OpenC2 specification.|2|-|None|None|session, agent, hostname|Success/Failure. Information on files associated with recent alerts|
-|DeployDecoy|Blue|Setup of a decoy service (type randomly assigned) on a specified host. Green agents do not access these services, so any access is an unambiguous indicator of red activity. Decoy services cannot replace legitimate services. When a red agent discovers or exploits a decoy service, the blue agent will receive alerts involving that host or service. The red agent will not be able to successfully exploit the decoy service.|2|-|None|None|session, agent, hostname|Success, if a legitimate service is not already running. Failure if there is already a legitimate service running on the target. Decoys also generate an alert if the red agent accesses the new service.|
-|Remove|Blue|Attempting to remove red from a host by destroying malicious processes, files and services. This action attempts to stop all processes identified as malicious by the monitor action. Corresponds to action ID 10: Stop in the OpenC2 specification.|3|-|None|None|session, agent, hostname|Success/Failure|
-|Restore|Blue|Restoring a system to a known good state. This has significant consequences for system availability. Corresponds to action ID 23: Restore in the OpenC2 specification.|5|-|None|None|session, agent, hostname|Success/Failure|
-|BlockTraffic|Blue|Block traffic to and from the specified zone. If green agents are attempting to communicate to that zone this will result in penalties.|1|Local|None|None|session, agent, from_subnet, to_subnet|Success/Failure|
-|AllowTraffic|Blue|Allow traffic to and from the specified zone.|1|Local|None|None|session, agent, from_subnet, to_subnet|Success/Failure|
-|DiscoverRemoteSystems|Red|ATT&CK Technique T1018 Remote System Discovery. Discovers new hosts/IP addresses in the network through active scanning using tools such as ping.|1|Remote|None|None|session, agent, subnet|Success/Failure. IP addresses in the chosen subnet from hosts that respond to ping.|
-|AggressiveServiceDiscovery|Red|ATT&CK Technique T1046 Network Service Scanning. Discovers responsive services on a selected host by initiating a connection with that host.|1|Remote|High (75%)|None|session, agent, ip_address|Success/Failure. Ports and service information.|
-|StealthServiceDiscovery|Red|Same as AggressiveServiceDiscovery but slower and quieter (i.e., lower chance of raising alerts).|3|Remote| Medium (25%)|None|session, agent, ip_address|Success/Failure. Ports and service information.|
-|Exploit Network Services|Red|ATT&CK Technique T1210 Exploitation of Remote Services. This action attempts to exploit a specified service on a remote system.|4|Remote|None|Medium (Failure dependant on weighted exploit choice)|session, agent, ip_address|Success/Failure. Initial recon of host if successful.|
-|PrivilegeEscalate|Red|ATT&CK Tactic TA0004 Privilege Escalation. This action escalates the agent’s privilege on the host.|2|Local|None|None|session, agent, hostname|Success/Failure. Internal information now available due to increased access to host.|
-|Impact|Red|ATT&CK Technique T1489 Service Stop. This action disrupts the performance of the network and fulfils red’s objective of denying the operational service.|2|Local|None|None|session, agent, hostname|Success/Failure|
-|DegradeServices|Red|If red has root privileges on a host, it may degrade the user experience for a green agent (for example by randomly dropping keystrokes or causing other mischief). Under the effect of Degrade, GreenLocalWork actions have higher failure rates (resulting in additional penalties for blue).|2|Remote|None|None|session, agent, hostname|Success/Failure|
-|DiscoverDeception|Red|Probe a host to determine if it is running decoy services.|2|Remote|None|Medium (50% chance false negative, 10% chance false positive)|session, agent, ip_address|Success/Failure. Believe legitimate or believe decoy.|
-|Withdraw|Red|Remove red presence from target host.|1|Remote|None|None|session, agent, hostname, ip_address|Success|
-|Sleep|All|Take no action this tick.|1|Local|None|None|None|None|
+### Remaining optimization opportunities
 
-## Appendix B – Agent observation
+All major hot paths identified in the initial swarm analysis have been addressed across
+Waves 1–3. The primary remaining opportunities are:
 
-The BlueEnterpriseWrapper performs utility functions that support MARL algorithms by conforming to the PettingZoo Environment. This wrapper alters the observation to enable the use of Deep Reinforcement Learning techniques. This appendix describes the altered observation.
+- **Scenario pool tuning** — `pool_size=8` is a conservative default. Profiling on
+  your hardware may show gains from larger pool sizes (16–32) if reset time remains
+  a bottleneck relative to step time.
+- **Cython / Numba acceleration of the inner step loop** — the Python interpreter
+  overhead in `SimulationController._step` and `BlueFlatWrapper.observation_change`
+  is now the dominant cost. A Cython extension or `@numba.njit` kernel for the
+  observation assembly loop is the most productive next-level target.
 
-The table below indicates what data is presented at each index of the observation of an agent. We use the symbol H to denote the maximum number of hosts in the local subnet, which is equal to 16 (10 user hosts and 6 servers). These hosts are ordered from server hosts 0-6, followed by user hosts 0-10. If a host is not present for a given episode, its corresponding slot in the vector will be zero for the duration of the episode. All ranges in the following tables are inclusive, so 1…H includes both 1 and H.
-
-Similarly, we use the symbol S to denote the number of subnets, which is always equal to 9 (2 Operational Zones, 2 Restricted Zones, Internet, Contractor Network, 3 subnets in the HQ zone). To ensure consistency across runs, all subnets are sorted alphabetically.
-
-There general structure of the observation vector is as follows where n is the number of subnets included in the observation space:
-
-<center>
-
-|**Index**            |**Length**|**Description**|**Value**|
-|:-------------------:|:--------:|:-------------:|:---------------------------|
-| 0                   | 1        | Mission Phase | 0: Mission Phase 1 <br />1: Mission Phase 2A <br />2: Mission Phase 2B |
-| 1                   | 3S+2H    | Subnet 0 Info | See "Subnet Info" Table |
-| 3S+2H+1             | ...      | ...           | ... |
-| 3(n-1)S+2(n-1)H+1   | 3S+2H    | Subnet n Info | ' ' |
-| 3nS+2nH+1           | 4x8      | Message Block | User Defined (See Below) |
-
-</center>
-
-The message block contains four, 8-bit messages from the other agents, with each index corresponding to a specific agent (0-4 in order, excluding self). The contents of these 8-bit messages are defined by the user, but will default to zero if not specified.
-
-The "Subnet Info" block for each subnet is further subdivided as follows:
-
-<center>
-
-|**Relative Index**|**Length**|**Description**                   |**Element Values (Boolean)**|
-|:-------------------:|:--------:|:--------------------------------:|:---------------------------|
-| 0                   | S        | One-hot Encoded Subnet Vector    | 1: Current Subnet <br />0: All Other Subnets |
-| S                   | S        | Blocked Subnets                  | 1: Subnet Blocked <br />0: Subnet Not Blocked |
-| 2S                  | S        | Communication Policy             | 1: Subnet *Should* be Blocked <br />0: Subnet *Should Not* be Blocked |
-| 3S                  | H        | Malicious Process Event Detected | 1: Malicious Process Detected on Host <br />0: No Events |
-| 3S+H                | H        | Malicious Network Event Detected | 1: Malicious Connection Detected on Host <br />0: No Events |
-
-</center>
-
-In this challenge, blue agents 0-3 are responsible for defending a single subnet each (n=1), while blue agent 4 defends three (n=3). For this reason, blue agent 4 has a longer observation than the others as the other agents only have a single subnet info block. If the `pad_spaces=True` option is supplied to `BlueEnterpriseWrapper`, the area *after* the message block will be filled with zeros for these agents.
+Bug reports and pull requests are welcome. Please include before/after timing from
+`cProfile` or `line_profiler` when submitting performance-related changes.

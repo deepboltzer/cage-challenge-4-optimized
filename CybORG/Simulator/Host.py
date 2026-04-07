@@ -330,49 +330,17 @@ class Host(Entity):
         self.original_processes = []
         if self.processes is not None:
             for process in self.processes:
-                temp = None
-                for p in process.get_state():
-                    if temp is None:
-                        open_port = {}
-                        if 'local_port' in p:
-                            open_port['local_port'] = p.pop('local_port')
-                        if 'remote_port' in p:
-                            open_port['remote_port'] = p.pop('remote_port')
-                        if 'local_address' in p:
-                            open_port['local_address'] = p.pop('local_address')
-                        if 'remote_address' in p:
-                            open_port['remote_address'] = p.pop('remote_address')
-                        if 'transport_protocol' in p:
-                            open_port['transport_protocol'] = p.pop('transport_protocol')
-                        if len(process.properties) > 0:
-                            p['properties'] = process.properties
-
-                        temp = p
-                        temp['open_ports'] = []
-                        if len(open_port) > 0:
-                            temp['open_ports'].append(open_port)
-                    else:
-                        open_port = {}
-                        if 'local_port' in p:
-                            open_port['local_port'] = p['local_port']
-                        if 'remote_port' in p:
-                            open_port['remote_port'] = p['remote_port']
-                        if 'local_address' in p:
-                            open_port['local_address'] = p['local_address']
-                        if 'remote_address' in p:
-                            open_port['remote_address'] = p['remote_address']
-                        if 'transport_protocol' in p:
-                            open_port['transport_protocol'] = p['transport_protocol']
-                        if len(open_port) > 0:
-                            temp['open_ports'].append(open_port)
-                self.original_processes.append(Process(**temp))
+                self.original_processes.append(process.clone())
 
         self.ephemeral_ports = []
         self.original_services = self._clone_services(self.services)
 
     def restore(self):
         """Restores the host by filling current class details from 'original' class attributes"""
-        self.events = HostEvents()
+        self.events.network_connections.clear()
+        self.events.old_network_connections.clear()
+        self.events.process_creation.clear()
+        self.events.old_process_creation.clear()
         self.files = []
         if self.original_files is not None:
             for file in self.original_files:
@@ -388,41 +356,7 @@ class Host(Entity):
         self.processes = []
         if self.original_processes is not None:
             for process in self.original_processes:
-                temp = None
-                for p in process.get_state():
-                    if temp is None:
-                        open_port = {}
-                        if 'local_port' in p:
-                            open_port['local_port'] = p.pop('local_port')
-                        if 'remote_port' in p:
-                            open_port['remote_port'] = p.pop('remote_port')
-                        if 'local_address' in p:
-                            open_port['local_address'] = p.pop('local_address')
-                        if 'remote_address' in p:
-                            open_port['remote_address'] = p.pop('remote_address')
-                        if 'transport_protocol' in p:
-                            open_port['transport_protocol'] = p.pop('transport_protocol')
-                        if len(process.properties) > 0:
-                            p['properties'] = process.properties
-                        temp = p
-                        temp['open_ports'] = []
-                        if len(open_port) > 0:
-                            temp['open_ports'].append(open_port)
-                    else:
-                        open_port = {}
-                        if 'local_port' in p:
-                            open_port['local_port'] = p['local_port']
-                        if 'remote_port' in p:
-                            open_port['remote_port'] = p['remote_port']
-                        if 'local_address' in p:
-                            open_port['local_address'] = p['local_address']
-                        if 'remote_address' in p:
-                            open_port['remote_address'] = p['remote_address']
-                        if 'transport_protocol' in p:
-                            open_port['transport_protocol'] = p['transport_protocol']
-                        if len(open_port) > 0:
-                            temp['open_ports'].append(open_port)
-                self.processes.append(Process(**temp))
+                self.processes.append(process.clone())
 
         self.ephemeral_ports = []
         self.services = self._clone_services(self.original_services)

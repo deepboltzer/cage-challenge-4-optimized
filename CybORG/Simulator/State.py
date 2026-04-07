@@ -147,6 +147,11 @@ class State(CybORGLogger):
         self.operational_firewall = scenario.operational_firewall
         self.blocks: Dict[str, List[str]] = {}
 
+        # P4-G: lazy O(1) index for get_session_from_pid.
+        # Rebuilt on first call after any mutation that sets _pid_index_dirty=True.
+        self._pid_session_index: dict = {}  # (hostname, pid) -> (agent, session_index)
+        self._pid_index_dirty: bool = True
+
     def get_true_state(self, info: dict) -> Observation:
         """Create's a dictionary containing the requested information from the state.
 
@@ -342,6 +347,8 @@ class State(CybORGLogger):
         host.add_session(session)
         if session.parent is not None:
             self.sessions[session.agent][session.parent].children[session.ident] = session
+        # P4-G: invalidate pid->session index so it is rebuilt on next lookup.
+        self._pid_index_dirty = True
         
     def add_file(self, host: str, name: str, path: str, user: str = None, user_permissions: str = None,
                  group: str = None, group_permissions: int = None, default_permissions: int = None):
@@ -434,6 +441,8 @@ class State(CybORGLogger):
             return
         host.sessions[agent].remove(session)
         session = self.sessions[agent].pop(session)
+        # P4-G: session removed; invalidate index.
+        self._pid_index_dirty = True
         if service:
             self.add_session(session)
 
@@ -456,12 +465,16 @@ class State(CybORGLogger):
         session_index: int
             The Session id of the found session.
         """
-        for agent, sessions in self.sessions.items():
-            for session_index, session in sessions.items():
-                # Check hostname first: cheaper string equality before integer pid check
-                if session.hostname == hostname and session.pid == pid:
-                    return agent, session_index
-        return None, None
+        # P4-G: O(1) lookup via lazy-built index keyed by (hostname, pid).
+        if self._pid_index_dirty:
+            index = {}
+            for agent, sessions in self.sessions.items():
+                for session_index, session in sessions.items():
+                    if session.pid is not None:
+                        index[(session.hostname, session.pid)] = (agent, session_index)
+            self._pid_session_index = index
+            self._pid_index_dirty = False
+        return self._pid_session_index.get((hostname, pid), (None, None))
 
     def reboot_host(self, hostname):
         """Unused. Used by deprecated action."""
@@ -474,6 +487,8 @@ class State(CybORGLogger):
                         other_session.routes.pop(session)
         host.sessions = {}
         host.processes = []
+        # P4-G: bulk session removal; invalidate index.
+        self._pid_index_dirty = True
         for file in host.files:
             if file.path == "/tmp/":
                 host.files.remove(file)

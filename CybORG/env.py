@@ -33,7 +33,6 @@ from CybORG.Simulator.Actions.ConcreteActions.ActivateTrojan import ActivateTroj
 from CybORG.Simulator.Actions.ConcreteActions.ControlTraffic import BlockTraffic, AllowTraffic
 from CybORG.Simulator.Actions.ConcreteActions.ExploitActions.ExploitAction import ExploitAction
 # from CybORG.Simulator.Scenarios import DroneSwarmScenarioGenerator, FileReaderScenarioGenerator
-from CybORG.Tests.utils import CustomGenerator
 # from CybORG.render.pygame_user_interface import SimulationGUI
 # from CybORG.render.renderer import Renderer
 
@@ -66,7 +65,8 @@ class CybORG(CybORGLogger):
     def __init__(self,
                  scenario_generator: ScenarioGenerator,
                  agents: dict = None,
-                 seed: Union[int, CustomGenerator] = None):
+                 seed=None,
+                 pool_size: int = 0):
         """Instantiates the CybORG class.
 
         Parameters
@@ -78,6 +78,9 @@ class CybORG(CybORGLogger):
             If None agents will be loaded from description in scenario file (default=None).
         seed : Union[int, CustomGenerator]
             optional seed for random number generator
+        pool_size : int
+            Number of scenarios to pre-generate and rotate through on each
+            reset(). 0 disables the pool (default=0).
         """
         assert issubclass(type(scenario_generator),
                           ScenarioGenerator), f'Scenario generator object of type {type(scenario_generator)} must be a subclass of ScenarioGenerator'
@@ -86,8 +89,10 @@ class CybORG(CybORGLogger):
         if seed is None or isinstance(seed, int):
             self.np_random, seed = seeding.np_random(seed)
         else:
+            from CybORG.Tests.utils import CustomGenerator  # lazy: only when non-int seed
+            assert isinstance(seed, CustomGenerator)
             self.np_random = seed
-        self.environment_controller = SimulationController(self.scenario_generator, agents, self.np_random)
+        self.environment_controller = SimulationController(self.scenario_generator, agents, self.np_random, pool_size=pool_size)
 
         # # CC4: GUI not implemented for CC4, disable by default
         # self._disable_gui = True

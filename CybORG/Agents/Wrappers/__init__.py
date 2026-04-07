@@ -4,4 +4,4 @@ from .BlueFixedActionWrapper import BlueFixedActionWrapper
 from .BlueFlatWrapper import BlueFlatWrapper
 from .BlueEnterpriseWrapper import BlueEnterpriseWrapper
 from .EnterpriseMAE import EnterpriseMAE
-from .VisualiseRedExpansion import VisualiseRedExpansion
+# from .VisualiseRedExpansion import VisualiseRedExpansion  # visualization tool; not needed during training
