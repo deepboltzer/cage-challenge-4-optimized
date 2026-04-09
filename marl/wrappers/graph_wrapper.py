@@ -49,6 +49,16 @@ class GraphWrapper(EnterpriseMAE):
         self._combine_pad_buf = None  # Lazily allocated per graph size
         self._all_msg_buf = None  # Lazily allocated per graph size
 
+    def _get_malfile(self, hostname: str) -> float:
+        state = self.env.environment_controller.state
+        if hostname not in state.hosts:
+            return 0.0
+
+        return float(any(
+            f.density >= 0.9 and not f.signed
+            for f in state.hosts[hostname].files
+        ))
+
     def action_translator(self, agent_name, a_id):
         '''
         Translates output of PPO model to an action for the CybORG env. 
@@ -246,7 +256,7 @@ class GraphWrapper(EnterpriseMAE):
         # Reuse pre-allocated buffer when size matches, otherwise reallocate
         n_nodes = g.n_permenant_nodes
         if self._tabular_x_buf is None or self._tabular_x_buf.size(0) != n_nodes:
-            self._tabular_x_buf = torch.zeros(n_nodes, 2)
+            self._tabular_x_buf = torch.zeros(n_nodes, 3)
         else:
             self._tabular_x_buf.zero_()
         x = self._tabular_x_buf
@@ -277,25 +287,38 @@ class GraphWrapper(EnterpriseMAE):
             dst += me
 
             # Pull out features for servers/hosts that exist
-            hosts = torch.from_numpy(block[27:]).reshape(2,16).T
+            hosts = torch.from_numpy(block[27:]).reshape(2, 16).T.float()
             n_srv, n_usr = g.subnet_size[router_name]
+
             srv_idx = list(range(n_srv))
-            usr_idx = list(range(6,n_usr+6))
+            usr_idx = list(range(6, n_usr + 6))
 
             # Insert into rows corresponding w server/host nodes in graph
             # (Always directly after node for subnet they are on)
-            start_usr_idx = g.nids[router_name]+1
+            start_usr_idx = g.nids[router_name] + 1
             start_srv_idx = start_usr_idx + len(usr_idx)
             end_srv_idx = start_srv_idx + len(srv_idx)
 
-            # Note: TabularWrapper goes from server to host, but
-            # graph goes from host to server (alphabetically)
-            # so we have to do some lifting to rearrange
-            x[start_usr_idx : start_srv_idx] = hosts[usr_idx]
-            x[start_srv_idx : end_srv_idx] = hosts[srv_idx]
+            # Bestehende zwei Features
+            x[start_usr_idx:start_srv_idx, :2] = hosts[usr_idx]
+            x[start_srv_idx:end_srv_idx, :2] = hosts[srv_idx]
 
-            # Each subnet can add 2 bits to the message for if any hosts
-            # are compromised/have been scanned
+            # Malfile-Flags in derselben Reihenfolge erzeugen
+            usr_malfiles = []
+            for j in range(n_usr):
+                h = f'{router_name.replace("_router", "")}_user_host_{j}'
+                usr_malfiles.append(self._get_malfile(h))
+
+            srv_malfiles = []
+            for j in range(n_srv):
+                h = f'{router_name.replace("_router", "")}_server_host_{j}'
+                srv_malfiles.append(self._get_malfile(h))
+
+            if usr_malfiles:
+                x[start_usr_idx:start_srv_idx, 2] = torch.tensor(usr_malfiles, dtype=torch.float32)
+            if srv_malfiles:
+                x[start_srv_idx:end_srv_idx, 2] = torch.tensor(srv_malfiles, dtype=torch.float32)
+
             msg = list((hosts.sum(dim=0) > 0).long())
             msgs += msg
 

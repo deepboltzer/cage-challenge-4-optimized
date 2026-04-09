@@ -341,7 +341,7 @@ class ObservationGraph:
 
             if type_features:
                 # Stack all numpy arrays at once, convert to tensor once
-                feat_batch = torch.from_numpy(np.stack(type_features))
+                feat_batch = torch.from_numpy(np.stack(type_features)).to(dtype=x.dtype)
                 idx_tensor = torch.tensor(type_indices, dtype=torch.long)
                 x[idx_tensor, offset : offset + type_dim] = feat_batch
 

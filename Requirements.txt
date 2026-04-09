@@ -14,7 +14,9 @@ lz4==4.3.3
 
 # Stable Baselines
 pettingzoo==1.24.3
+stable-baselines3==2.2.1
 sb3-contrib==2.2.1
+shimmy>=1.3.0
 
 # Utilities
 prettytable==3.9.0
@@ -36,15 +38,8 @@ tensorboardX==2.6.2.2
 pygame==2.5.2
 pygame-gui==0.6.9
 
-#Graph Neural Networks
+# Graph Neural Networks
 torch_geometric==2.5.0
 
 rich
-
-stable-baselines3>=2.3.0
-sb3-contrib>=2.3.0
-shimmy>=1.3.0
-gymnasium>=0.29.0
 anthropic>=0.30.0
-matplotlib>=3.7.0
-pyyaml>=6.0
