@@ -33,7 +33,11 @@ from models.memory_buffer import MultiPPOMemory
 from wrappers.graph_wrapper import GraphWrapper
 from wrappers.observation_graph import ObservationGraph
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device(
+    "mps" if torch.backends.mps.is_available() else
+    "cuda" if torch.cuda.is_available() else
+    "cpu"
+)
 print("Using device:", device)
 
 # Enable cuDNN autotuner for faster convolutions when using CUDA
@@ -176,7 +180,7 @@ def train(agents, hp, seed=SEED):
         e *= hp.N
 
         # Generate N episodes in parallel 
-        out = Parallel(prefer='loky', n_jobs=hp.workers)(
+        out = Parallel(backend='loky', n_jobs=hp.workers)(
             delayed(generate_episode_job)(agents, envs[i % len(envs)], hp, i) for i in range(hp.N)
         )
 
@@ -223,8 +227,14 @@ if __name__ == '__main__':
     ap.add_argument('--hidden', type=int, default=256)
     ap.add_argument('--embedding', type=int, default=128)
     ap.add_argument('--debug', action='store_true', help='Small, safe config')
+    ap.add_argument("--phase_reward_mode", default="default",
+                    choices=["default", "contractor_off", "red_only"])
+    ap.add_argument("--reward_blue", action="store_true")
     args = ap.parse_args()
     print(args)
+
+    os.environ["CYBORG_PHASE_REWARD_MODE"] = args.phase_reward_mode
+    os.environ["CYBORG_REWARD_blue"] = "1" if args.reward_blue else "0"
 
     if args.debug:
         HYPER_PARAMS.N = 2
@@ -244,7 +254,7 @@ if __name__ == '__main__':
         os.mkdir('checkpoints')
 
     # Add 5 extra dimensions to observation graph: 
-    #   2 for tabular data (gets appended to relevant hosts)
+    #   3 for tabular data (gets appended to relevant hosts)
     #   3 for message data (gets appended to relevant subnets): 
     #       1 bit if subnet has comprimised host in it
     #       1 bit if subnet has scanned host in it
@@ -254,7 +264,7 @@ if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     agents = [InductiveGraphPPOAgent(
-        ObservationGraph.DIM + 5,
+        ObservationGraph.DIM + 6,
         bs=HYPER_PARAMS.bs,
         a_kwargs={'lr': 0.0003, 'hidden1': args.hidden, 'hidden2': args.embedding},
         c_kwargs={'lr': 0.001, 'hidden1': args.hidden, 'hidden2': args.embedding},
