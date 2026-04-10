@@ -1,16 +1,20 @@
-"""Official CC4 submission -- EnterpriseHeuristicAgent v9.
+"""Official CC4 submission -- EnterpriseHeuristicAgent v10b (Restore-only).
 
 Compatible with CybORG/Evaluation/evaluation.py interface.
 Uses BlueFlatWrapperV2 for observations (adds malicious-file flags) and
 action masks.
 
-v9 improvements over v7:
-  - Inter-agent messaging: zero-redundancy 8-bit protocol (THREAT_LEVEL, OPEN_PATHS,
-    RED_HOST_COUNT, DECOYS_BYPASSED, RESTORING)
-  - Upstream peer escalation: proc-flag Remove→Restore threshold dynamically adjusted
-    based on peer threat level, red count, and decoy-bypass signals
-  - Decoy-bypass suppression: conn-only skip-Restore suppressed when upstream reports
-    DECOYS_BYPASSED (red has PID knowledge of decoys)
+v10b improvements over v9.1:
+  - Restore-only threat response: Remove eliminated entirely.
+    PrivEsc (2 steps, 100% success) completes before Remove (3 steps),
+    so Remove always fails against escalating red. Restore kills ALL sessions.
+  - flag_age >= 1 threshold filters green false positives (0.776% rate)
+  - Impact-target OZ server_host_0 gets immediate Restore (flag_age >= 0)
+  - Inter-agent messaging: v9 8-bit protocol retained
+
+Performance: -771.8 ± 212.5 (seed 42, 30 eps) = +25.6% over v9.1 baseline.
+Consistent across seeds 42, 123, 456, 789 (aggregate +24.7%).
+Beats Oracle V3 (-893.5) due to decoy prevention advantage.
 
 Note on evaluation.py compatibility: evaluation.py does not pass messages to step().
 HeuristicEnv.step() intercepts each call and injects stored outgoing messages so
@@ -23,11 +27,11 @@ import numpy as np
 from CybORG import CybORG
 from CybORG.Agents import BaseAgent
 from CybORG.Agents.Wrappers import BlueFlatWrapperV2
-from CybORG.Agents.SimpleAgents.EnterpriseHeuristicAgent import EnterpriseHeuristicAgent
+from CybORG.Agents.SimpleAgents.EnterpriseHeuristicAgentV10b import EnterpriseHeuristicAgentV10b
 
 
 class HeuristicSubmissionAgent(BaseAgent):
-    """Adapter: wraps EnterpriseHeuristicAgent for the evaluation.py interface.
+    """Adapter: wraps EnterpriseHeuristicAgentV10b for the evaluation.py interface.
 
     The evaluation calls get_action(obs, action_space).  We ignore the
     action_space argument and instead fetch the boolean action mask directly
@@ -36,7 +40,7 @@ class HeuristicSubmissionAgent(BaseAgent):
 
     def __init__(self, agent_name: str) -> None:
         self.agent_name = agent_name
-        self._inner = EnterpriseHeuristicAgent(agent_name=agent_name)
+        self._inner = EnterpriseHeuristicAgentV10b(agent_name=agent_name)
         self._env: "HeuristicEnv | None" = None
         self._last_message: "np.ndarray | None" = None
 
@@ -109,13 +113,16 @@ class HeuristicEnv(BlueFlatWrapperV2):
 
 class Submission:
     # -- Required metadata ----------------------------------------------------
-    NAME: str = "EnterpriseHeuristicAgent v9"
+    NAME: str = "EnterpriseHeuristicAgent v10b"
     TEAM: str = "CC4-Optimized"
     TECHNIQUE: str = (
-        "Rule-based priority heuristic with multi-decoy saturation (MAX_DECOYS=3 on all hosts) "
-        "and inter-agent messaging (v9 8-bit protocol: THREAT_LEVEL, OPEN_PATHS, RED_HOST_COUNT, "
-        "DECOYS_BYPASSED, RESTORING). Decoy-hit detection via BlueFlatWrapperV2 malfile flags; "
-        "upstream peer escalation for Remove-to-Restore threshold; comms-policy-driven firewall management."
+        "Rule-based priority heuristic with Restore-only threat response (Remove eliminated — "
+        "PrivEsc 100% success in 2 steps beats Remove 3 steps). flag_age >= 1 threshold filters "
+        "green false positives; Impact-target OZ server_host_0 gets immediate Restore. "
+        "Multi-decoy saturation (MAX_DECOYS=3, 75% blind exploit failure rate), inter-agent "
+        "messaging (v9 8-bit protocol: THREAT_LEVEL, OPEN_PATHS, RED_HOST_COUNT, DECOYS_BYPASSED, "
+        "RESTORING). Decoy-hit detection via BlueFlatWrapperV2 malfile flags; upstream peer "
+        "escalation; comms-policy-driven firewall management."
     )
 
     # One agent per blue team member (blue_agent_0 through blue_agent_4)

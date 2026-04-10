@@ -131,6 +131,22 @@ def _collect_host_states(state):
         except Exception:
             pass
 
+        # Count decoy processes
+        decoy_count = 0
+        try:
+            if hasattr(host, "processes") and isinstance(host.processes, dict):
+                decoy_count = sum(1 for p in host.processes.values()
+                                  if getattr(p, "decoy_type", None) is not None)
+        except Exception:
+            pass
+
+        # Restore tracking: restore_count > 0 means host was recently restored
+        restore_count = getattr(host, "restore_count", 0)
+        impact_count = getattr(host, "impact_count", 0)
+
+        # Service reliability approximation: 0% if impacted, else 100%
+        reliability = 0.0 if impact_count > 0 else 100.0
+
         yield {
             "host_name": str(hostname),
             "subnet_name": subnet,
@@ -139,11 +155,11 @@ def _collect_host_states(state):
             "has_blue_session": len(blue_sessions) > 0,
             "num_processes": num_procs,
             "num_connections": num_conns,
-            "has_malware": False,
-            "decoy_count": 0,
-            "is_restoring": False,
+            "has_malware": has_root,
+            "decoy_count": decoy_count,
+            "is_restoring": restore_count > 0,
             "is_being_removed": False,
-            "service_reliability_pct": 100.0,
+            "service_reliability_pct": reliability,
         }
 
 
@@ -160,18 +176,30 @@ def _collect_sessions(state, step: int):
 
 
 def _collect_traffic(state):
-    """Yield traffic block status for all subnet pairs."""
+    """Yield traffic block status for all subnet pairs.
+
+    state.blocks is {subnet_name_str: [blocked_source_name_str, ...]}.
+    state.subnets keys are IPv4Network objects (CIDR), not names.
+    We use the hostname_subnet_map to get subnet name strings.
+    """
     blocks = getattr(state, "blocks", {})
-    subnets = list(state.subnets.keys()) if hasattr(state, "subnets") else []
-    for dst in subnets:
-        blocked_sources = blocks.get(dst, set())
-        for src in subnets:
+    # Collect all known subnet name strings from blocks + hostname_subnet_map
+    subnet_names = set(blocks.keys())
+    hsm = getattr(state, "hostname_subnet_map", {})
+    for sn in hsm.values():
+        subnet_names.add(str(sn))
+    subnet_names = sorted(subnet_names)
+
+    for dst in subnet_names:
+        blocked_sources = blocks.get(dst, [])
+        blocked_set = {str(b) for b in blocked_sources}
+        for src in subnet_names:
             if src == dst:
                 continue
             yield {
-                "source_subnet": str(src),
-                "dest_subnet": str(dst),
-                "is_blocked": str(src) in {str(b) for b in blocked_sources},
+                "source_subnet": src,
+                "dest_subnet": dst,
+                "is_blocked": src in blocked_set,
                 "should_be_blocked": False,
             }
 
@@ -334,8 +362,31 @@ def run_instrumented(n_episodes: int, max_steps: int, seed: int, agent_type: str
                 if r != 0:
                     db.log_reward_breakdown(episode_id, step, name, "step_reward", r)
 
-            # --- Ground truth: host states ---
+            # --- Red/Green agent actions from environment controller ---
             state = _get_state(env)
+            if state:
+                ec = getattr(env, "env", None)
+                ec = getattr(ec, "environment_controller", None) if ec else None
+                if ec and hasattr(ec, "action"):
+                    for ag_name, act_list in ec.action.items():
+                        ag_str = str(ag_name)
+                        if "blue" in ag_str:
+                            continue  # already logged above
+                        team = "red" if "red" in ag_str else "green"
+                        act_label = str(act_list[0]) if act_list else "Sleep"
+                        act_type = act_label.split()[0] if act_label else "Sleep"
+                        target = None
+                        parts = act_label.split()
+                        if len(parts) > 1:
+                            target = parts[1]
+                        db.log_action(
+                            episode_id, step, ag_str, team,
+                            act_type, act_label, target, None,
+                            -1, success=True, duration=0.0,
+                            reasoning={"text": f"{team} agent action"},
+                        )
+
+            # --- Ground truth: host states ---
             if state:
                 host_states = list(_collect_host_states(state))
                 if host_states:
@@ -351,6 +402,14 @@ def run_instrumented(n_episodes: int, max_steps: int, seed: int, agent_type: str
                     db.log_traffic_batch(episode_id, step, traffic)
 
             if all(term_dict.get(n, False) or trunc_dict.get(n, False) for n in agent_names):
+                # Log the final step+1 state snapshot before breaking
+                final_state = _get_state(env)
+                if final_state:
+                    final_phase = int(final_state.mission_phase) if final_state else phase
+                    db.log_step(episode_id, step + 1, final_phase, 0.0, total_reward)
+                    fhs = list(_collect_host_states(final_state))
+                    if fhs:
+                        db.log_host_states_batch(episode_id, step + 1, fhs)
                 break
 
         db.end_episode(episode_id, total_reward, "completed")

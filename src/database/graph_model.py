@@ -34,15 +34,15 @@ COLORS = {
 # Default 3-D positions for subnet nodes (logical network topology)
 # ---------------------------------------------------------------------------
 SUBNET_POSITIONS: dict[str, dict[str, float]] = {
-    "internet_subnet":                {"x": 0,    "y": 200,  "z": 0},
-    "public_access_zone_subnet":      {"x": 0,    "y": 120,  "z": 0},
-    "contractor_network_subnet":      {"x": -160, "y": 120,  "z": 0},
-    "office_network_subnet":          {"x": -60,  "y": 0,    "z": 0},
-    "admin_network_subnet":           {"x": 60,   "y": 0,    "z": 0},
-    "operational_zone_a_subnet":      {"x": -80,  "y": -120, "z": 40},
-    "operational_zone_b_subnet":      {"x": 80,   "y": -120, "z": 40},
-    "restricted_zone_a_subnet":       {"x": -160, "y": -120, "z": -40},
-    "restricted_zone_b_subnet":       {"x": 160,  "y": -120, "z": -40},
+    "internet_subnet":                {"x": 0,    "y": 220,  "z": 0},
+    "public_access_zone_subnet":      {"x": 0,    "y": 110,  "z": 0},
+    "contractor_network_subnet":      {"x": -200, "y": 80,   "z": 40},
+    "office_network_subnet":          {"x": -90,  "y": 10,   "z": -40},
+    "admin_network_subnet":           {"x": 90,   "y": 10,   "z": 40},
+    "operational_zone_a_subnet":      {"x": -140, "y": -190, "z": 50},
+    "operational_zone_b_subnet":      {"x": 140,  "y": -190, "z": -50},
+    "restricted_zone_a_subnet":       {"x": -140, "y": -90,  "z": -30},
+    "restricted_zone_b_subnet":       {"x": 140,  "y": -90,  "z": 30},
 }
 
 SUBNET_ROLES: dict[str, str] = {
@@ -312,6 +312,11 @@ class GraphBuilder:
                 aname = sess["agent"]
                 team = "red" if "red" in aname else "green" if "green" in aname else "blue"
                 color_key = f"agent_{team}"
+                # Green/red agents not in agent_actions: show session-based status
+                default_action = {
+                    "green": "UserActivity",
+                    "red": "Attacking",
+                }.get(team, "Sleep")
                 snap.nodes.append(GraphNode(
                     id=aid,
                     type="agent",
@@ -319,8 +324,8 @@ class GraphBuilder:
                     group=f"team_{team}",
                     properties={
                         "team": team,
-                        "current_action": "unknown",
-                        "last_action_target": None,
+                        "current_action": default_action,
+                        "last_action_target": sess.get("host"),
                         "color": COLORS.get(color_key, COLORS["agent_blue"]),
                     },
                 ))
@@ -493,7 +498,7 @@ def _node_color(node: GraphNode) -> str:
     props = node.properties
     if props.get("is_restoring"):
         return COLORS["host_restoring"]
-    compromise = props.get("compromise_level", "none")
+    compromise = props.get("compromise_level") or props.get("compromised_level") or "none"
     if compromise == "root":
         return COLORS["host_root_compromised"]
     if compromise == "user":
@@ -510,7 +515,7 @@ def _node_value(node: GraphNode) -> int:
     if node.type == "agent":
         return 4
     # Host -- larger if compromised
-    compromise = node.properties.get("compromise_level", "none")
+    compromise = node.properties.get("compromise_level") or node.properties.get("compromised_level") or "none"
     if compromise == "root":
         return 3
     if compromise == "user":
