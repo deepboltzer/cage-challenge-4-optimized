@@ -30,19 +30,17 @@ PHASE_1_START = 167
 PHASE_2_START = 334
 MAX_STEPS = 500
 
-# IEEE MILCOM color palette
-COLORS = {
-    "primary": "#003366",      # Dark navy
-    "secondary": "#0066CC",    # Medium blue
-    "accent1": "#CC3333",      # Red
-    "accent2": "#339933",      # Green
-    "accent3": "#FF9900",      # Orange
-    "accent4": "#6633CC",      # Purple
-    "light1": "#6699CC",       # Light blue
-    "light2": "#99CC99",       # Light green
-    "gray": "#666666",         # Medium gray
-    "lightgray": "#CCCCCC",    # Light gray
-}
+# IEEE B&W-safe 4-color palette (distinct luminance values)
+# Chosen so each color maps to a different gray level when printed B&W:
+#   C1 → dark (~25% lum), C2 → medium (~50%), C3 → light (~72%), C4 → very light (~88%)
+C1 = "#1b1b1b"   # Near-black  (baseline / primary)
+C2 = "#e03531"   # Medium-red  (countermeasure / alert — prints mid-gray)
+C3 = "#5b9bd5"   # Steel-blue  (secondary — prints light-gray)
+C4 = "#a8d08d"   # Sage-green  (tertiary — prints very-light-gray)
+CGRAY = "#888888" # Neutral gray for non-significant / gridlines
+
+# Hatching patterns as secondary B&W distinguisher
+HATCHES = ["", "//", "\\\\", "xx"]
 
 
 def _get_phase(step: int) -> int:
@@ -421,338 +419,300 @@ def collect_cross_seed_data(n_episodes=30, seeds=(42, 123, 7)):
 # ═══════════════════════════════════════════════════════════════════════
 
 def setup_plotting():
+    """Configure matplotlib for IEEE MILCOM: Times serif, 8pt base, B&W-safe."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import scienceplots  # noqa: F401
     plt.style.use(["science", "ieee", "no-latex"])
     plt.rcParams.update({
+        # Match IEEEtran body: Times / serif, ~8-9pt
+        "font.family": "serif",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
         "font.size": 8,
-        "axes.labelsize": 9,
-        "axes.titlesize": 9,
+        "axes.labelsize": 8,
+        "axes.titlesize": 8,
+        "axes.titleweight": "bold",
         "legend.fontsize": 7,
         "xtick.labelsize": 7,
         "ytick.labelsize": 7,
         "figure.dpi": 300,
         "savefig.dpi": 300,
         "savefig.bbox": "tight",
-        "savefig.pad_inches": 0.05,
+        "savefig.pad_inches": 0.02,
+        # Thin spines & ticks like IEEE figures
+        "axes.linewidth": 0.6,
+        "xtick.major.width": 0.5,
+        "ytick.major.width": 0.5,
+        "xtick.major.size": 3,
+        "ytick.major.size": 3,
     })
     return plt
 
 
-def fig3_reward_analysis(plt, baseline_data, countermeasure_data, save=True):
-    """Figure 3: 2x2 — Reward analysis and countermeasure comparison.
+# ── Column width for IEEE 2-column: 3.5 in ──
+COL_W = 3.5
 
-    (a) Cumulative reward trajectory over 500 steps
-    (b) Per-phase reward breakdown
-    (c) Countermeasure box plots
-    (d) Effect sizes (forest plot)
-    """
+
+def _safe_save(fig, name):
+    """Save figure to PDF+PNG, handling locked files by using a temp name."""
+    import shutil
+    for ext in (".pdf", ".png"):
+        target = FIG_DIR / f"{name}{ext}"
+        try:
+            fig.savefig(target)
+        except PermissionError:
+            tmp = FIG_DIR / f"{name}_new{ext}"
+            fig.savefig(tmp)
+            print(f"  WARNING: {target.name} locked — saved as {tmp.name}")
+            continue
+    print(f"  Saved {name}.pdf/png")
+
+
+def fig3_reward_analysis(plt, baseline_data, countermeasure_data, save=True):
+    """Figure 3 (1-column, 2x2): reward trajectory, phase breakdown,
+    countermeasure comparison, effect-size forest plot."""
     from scipy import stats as sp_stats
 
-    fig, axes = plt.subplots(2, 2, figsize=(7.0, 5.0))
+    fig, axes = plt.subplots(2, 2, figsize=(COL_W, 3.6),
+                             gridspec_kw={"hspace": 0.55, "wspace": 0.45})
 
     # ── (a) Cumulative reward trajectory ──
     ax = axes[0, 0]
     step_rewards = np.array(baseline_data["step_rewards"])
     cumulative = np.cumsum(step_rewards, axis=1)
-    mean_cum = np.mean(cumulative, axis=1)
     mean_traj = np.mean(cumulative, axis=0)
     std_traj = np.std(cumulative, axis=0)
-
     steps = np.arange(MAX_STEPS)
-    ax.plot(steps, mean_traj, color=COLORS["primary"], linewidth=1.2, label="Mean")
+
+    ax.plot(steps, mean_traj, color=C1, linewidth=0.8, label="Mean")
     ax.fill_between(steps, mean_traj - std_traj, mean_traj + std_traj,
-                    alpha=0.2, color=COLORS["secondary"])
-
-    # Phase boundaries
-    for ps, lbl in [(PHASE_1_START, "Phase 1"), (PHASE_2_START, "Phase 2")]:
-        ax.axvline(ps, color=COLORS["accent1"], linestyle="--", linewidth=0.7, alpha=0.7)
-        ax.text(ps + 3, ax.get_ylim()[0] * 0.05, lbl,
-                fontsize=6, color=COLORS["accent1"], rotation=90, va="bottom")
-
+                    alpha=0.15, color=CGRAY)
+    for ps, lbl in [(PHASE_1_START, "Ph1"), (PHASE_2_START, "Ph2")]:
+        ax.axvline(ps, color=CGRAY, linestyle="--", linewidth=0.5)
+        ax.text(ps + 5, 10, lbl, fontsize=5, color=CGRAY, va="top")
     ax.set_xlabel("Step")
-    ax.set_ylabel("Cumulative Reward")
-    ax.set_title("(a) Reward Trajectory")
-    ax.legend(loc="lower left", framealpha=0.8)
+    ax.set_ylabel("Cumulative reward")
+    ax.set_title("(a) Reward trajectory")
 
-    # ── (b) Per-phase reward breakdown ──
+    # ── (b) Per-phase reward ──
     ax = axes[0, 1]
     phase_rewards = np.array(baseline_data["phase_rewards"])
     phase_means = np.mean(phase_rewards, axis=0)
     phase_stds = np.std(phase_rewards, axis=0)
-    phase_labels = ["Phase 0\n(steps 0–166)", "Phase 1\n(steps 167–333)",
-                    "Phase 2\n(steps 334–499)"]
-    colors_phase = [COLORS["secondary"], COLORS["accent1"], COLORS["accent3"]]
+    x_ph = np.arange(3)
+    bar_colors = [C1, C2, C3]
+    bar_hatches = ["", "//", "\\\\"]
 
-    bars = ax.bar(range(3), phase_means, yerr=phase_stds, capsize=3,
-                  color=colors_phase, edgecolor="black", linewidth=0.5, alpha=0.85)
-    ax.set_xticks(range(3))
-    ax.set_xticklabels(phase_labels, fontsize=6)
-    ax.set_ylabel("Mean Reward")
-    ax.set_title("(b) Reward by Mission Phase")
+    bars = ax.bar(x_ph, phase_means, yerr=phase_stds, capsize=2,
+                  color=bar_colors, edgecolor="black", linewidth=0.5,
+                  width=0.6, error_kw={"linewidth": 0.6})
+    for bar, h in zip(bars, bar_hatches):
+        bar.set_hatch(h)
+    ax.set_xticks(x_ph)
+    ax.set_xticklabels(["Phase 0", "Phase 1", "Phase 2"], fontsize=6)
+    ax.set_ylabel("Mean reward")
+    ax.set_title("(b) Reward by phase")
+    # Value labels
+    for bar, m in zip(bars, phase_means):
+        ax.text(bar.get_x() + bar.get_width() / 2, m - 30,
+                f"{m:.0f}", ha="center", va="top", fontsize=5)
 
-    # Add value labels
-    for bar, m, s in zip(bars, phase_means, phase_stds):
-        ax.text(bar.get_x() + bar.get_width() / 2, m - s - 15,
-                f"{m:.0f}", ha="center", va="top", fontsize=6, fontweight="bold")
-
-    # ── (c) Countermeasure comparison (box plots) ──
+    # ── (c) Countermeasure box plots ──
     ax = axes[1, 0]
     cm = countermeasure_data
     data_list = [cm["baseline"], cm["proactive_oz"],
                  cm["expanded_flag_age"], cm["combined"]]
-    labels_cm = ["V11a\nBaseline", "Proactive\nOZ Restore",
-                 "Expanded\nFlag-Age", "Combined"]
-    colors_cm = [COLORS["primary"], COLORS["accent2"],
-                 COLORS["accent3"], COLORS["accent4"]]
-
-    bp = ax.boxplot(data_list, patch_artist=True, widths=0.6,
-                    medianprops=dict(color="black", linewidth=1.2),
-                    flierprops=dict(marker="o", markersize=2, alpha=0.4))
-    for patch, c in zip(bp["boxes"], colors_cm):
+    bp = ax.boxplot(data_list, patch_artist=True, widths=0.55,
+                    medianprops=dict(color="black", linewidth=0.9),
+                    whiskerprops=dict(linewidth=0.6),
+                    capprops=dict(linewidth=0.6),
+                    flierprops=dict(marker=".", markersize=2, alpha=0.5,
+                                   markerfacecolor=CGRAY, markeredgecolor="none"))
+    box_colors = [C1, C2, C3, C4]
+    for patch, c, h in zip(bp["boxes"], box_colors, HATCHES):
         patch.set_facecolor(c)
-        patch.set_alpha(0.7)
-    ax.set_xticklabels(labels_cm, fontsize=6)
-    ax.set_ylabel("Episode Reward")
-    ax.set_title("(c) Countermeasure Comparison")
+        patch.set_edgecolor("black")
+        patch.set_linewidth(0.6)
+        patch.set_hatch(h)
+    ax.set_xticklabels(["Base", "Proact.\nRestore", "Exp.\nflag", "Comb."],
+                        fontsize=5)
+    ax.set_ylabel("Episode reward")
+    ax.set_title("(c) Countermeasures")
+    # Mean markers
+    for i, d in enumerate(data_list):
+        ax.plot(i + 1, np.mean(d), "D", markersize=3,
+                color="white", markeredgecolor="black", markeredgewidth=0.6,
+                zorder=5)
 
-    # Add means as diamonds
-    means = [np.mean(d) for d in data_list]
-    for i, m in enumerate(means):
-        ax.plot(i + 1, m, "D", color="white", markersize=4,
-                markeredgecolor="black", markeredgewidth=0.8, zorder=5)
-
-    # ── (d) Effect sizes (forest plot) ──
+    # ── (d) Effect-size forest plot ──
     ax = axes[1, 1]
     baseline_arr = np.array(cm["baseline"])
-    experiments = [
-        ("Proactive\nOZ Restore", cm["proactive_oz"]),
-        ("Expanded\nFlag-Age", cm["expanded_flag_age"]),
+    exps = [
+        ("Proactive Restore", cm["proactive_oz"]),
+        ("Expanded flag-age", cm["expanded_flag_age"]),
         ("Combined", cm["combined"]),
     ]
-
-    y_positions = list(range(len(experiments)))
-    for i, (label, data) in enumerate(experiments):
+    markers = ["o", "s", "^"]
+    for i, (label, data) in enumerate(exps):
         data_arr = np.array(data)
         delta = data_arr.mean() - baseline_arr.mean()
         pooled_std = np.sqrt((baseline_arr.std()**2 + data_arr.std()**2) / 2)
         d = delta / pooled_std if pooled_std > 0 else 0
-
-        # 95% CI for Cohen's d (approximate)
         n1, n2 = len(baseline_arr), len(data_arr)
         se_d = np.sqrt((n1 + n2) / (n1 * n2) + d**2 / (2 * (n1 + n2)))
         ci_lo, ci_hi = d - 1.96 * se_d, d + 1.96 * se_d
+        _, p_val = sp_stats.ttest_ind(baseline_arr, data_arr, equal_var=False)
 
-        # t-test
-        t_stat, p_val = sp_stats.ttest_ind(baseline_arr, data_arr, equal_var=False)
-
-        color = COLORS["accent1"] if p_val < 0.05 else COLORS["gray"]
+        mc = C2 if p_val < 0.05 else C1
         ax.errorbar(d, i, xerr=[[d - ci_lo], [ci_hi - d]],
-                    fmt="o", color=color, markersize=5, capsize=3,
-                    linewidth=1.2, markeredgecolor="black", markeredgewidth=0.5)
-        ax.text(ci_hi + 0.05, i, f"p={p_val:.3f}", va="center",
-                fontsize=6, color=color)
+                    fmt=markers[i], color=mc, markersize=4, capsize=2,
+                    linewidth=0.7, markeredgecolor="black", markeredgewidth=0.4)
+        ax.text(ci_hi + 0.06, i, f"p={p_val:.2f}", va="center", fontsize=5,
+                color=mc)
 
-    ax.axvline(0, color="black", linestyle="-", linewidth=0.8)
-    ax.axvspan(-0.2, 0.2, alpha=0.1, color=COLORS["lightgray"])
-    ax.set_yticks(y_positions)
-    ax.set_yticklabels([e[0] for e in experiments], fontsize=6)
-    ax.set_xlabel("Cohen's $d$ (effect size)")
-    ax.set_title("(d) Effect Sizes vs. Baseline")
-    ax.text(0, -0.6, "negligible", ha="center", fontsize=5, color=COLORS["gray"],
-            style="italic")
+    ax.axvline(0, color="black", linewidth=0.6)
+    ax.axvspan(-0.2, 0.2, alpha=0.08, color=CGRAY, label="|d|<0.2")
+    ax.set_yticks(range(len(exps)))
+    ax.set_yticklabels([e[0] for e in exps], fontsize=5.5)
+    ax.set_xlabel("Cohen's d")
+    ax.set_title("(d) Effect sizes")
 
-    plt.tight_layout()
     if save:
-        fig.savefig(FIG_DIR / "fig3_reward_analysis.pdf")
-        fig.savefig(FIG_DIR / "fig3_reward_analysis.png")
-        print(f"  Saved fig3_reward_analysis.pdf/png")
+        _safe_save(fig, "fig3_reward_analysis")
     return fig
 
 
 def fig4_degradation_analysis(plt, degrade_data, baseline_data, save=True):
-    """Figure 4: 2x2 — DegradeServices information asymmetry analysis.
+    """Figure 4 (1-column, 2x2): degradation subnet distribution,
+    reliability trajectory, timing gaps, phase + restoration."""
+    fig, axes = plt.subplots(2, 2, figsize=(COL_W, 3.6),
+                             gridspec_kw={"hspace": 0.6, "wspace": 0.45})
 
-    (a) Degradation events by subnet
-    (b) Service reliability trajectory over episode
-    (c) Timing gaps (root → degrade → restore)
-    (d) Degradation by mission phase + restoration rate
-    """
-    fig, axes = plt.subplots(2, 2, figsize=(7.0, 5.0))
-
-    # ── (a) Degradation events by subnet ──
+    # ── (a) Degradation by subnet ──
     ax = axes[0, 0]
     subnet_data = degrade_data["by_subnet"]
-    # Clean up subnet names
-    name_map = {
-        "contractor": "Contractor",
-        "admin": "Admin",
-        "office": "Office",
-        "operational_zone_a": "OZ-A",
-        "operational_zone_b": "OZ-B",
-        "restricted_zone_a": "RZ-A",
-        "restricted_zone_b": "RZ-B",
-        "public_access": "PAZ",
-        "unknown": "Unknown",
-    }
+    name_map = {"contractor": "Contractor", "admin": "Admin", "office": "Office",
+                "operational_zone_a": "OZ-A", "operational_zone_b": "OZ-B",
+                "restricted_zone_a": "RZ-A", "restricted_zone_b": "RZ-B",
+                "public_access": "PAZ", "unknown": "Other"}
     subnets = sorted(subnet_data.keys(), key=lambda x: -subnet_data[x])
-    counts = [subnet_data[s] for s in subnets]
-    clean_names = [name_map.get(s, s) for s in subnets]
-    total = sum(counts)
-    pcts = [c / total * 100 for c in counts]
+    total = sum(subnet_data.values())
+    pcts = [subnet_data[s] / total * 100 for s in subnets]
+    names = [name_map.get(s, s) for s in subnets]
 
-    colors_sub = []
+    # Color: contractor=dark, OZ=medium, rest=light
+    bc = []
+    bh = []
     for s in subnets:
         if s == "contractor":
-            colors_sub.append(COLORS["accent1"])
+            bc.append(C1); bh.append("")
         elif "operational" in s:
-            colors_sub.append(COLORS["accent3"])
+            bc.append(C3); bh.append("//")
         else:
-            colors_sub.append(COLORS["secondary"])
+            bc.append(C4); bh.append("\\\\")
 
-    bars = ax.barh(range(len(subnets)), pcts, color=colors_sub,
-                   edgecolor="black", linewidth=0.5, alpha=0.85)
+    bars = ax.barh(range(len(subnets)), pcts, color=bc,
+                   edgecolor="black", linewidth=0.5, height=0.65)
+    for bar, h in zip(bars, bh):
+        bar.set_hatch(h)
     ax.set_yticks(range(len(subnets)))
-    ax.set_yticklabels(clean_names, fontsize=6)
-    ax.set_xlabel("Share of Degradation Events (%)")
-    ax.set_title("(a) Degradation by Subnet")
+    ax.set_yticklabels(names, fontsize=5.5)
+    ax.set_xlabel("Events (%)")
+    ax.set_title("(a) Degradation by subnet")
     ax.invert_yaxis()
+    # Label on contractor bar
+    if pcts[0] > 30:
+        ax.text(pcts[0] - 2, 0, f"{pcts[0]:.0f}%", ha="right", va="center",
+                fontsize=6, fontweight="bold", color="white")
 
-    # Add percentage labels
-    for bar, pct in zip(bars, pcts):
-        if pct > 5:
-            ax.text(bar.get_width() - 1, bar.get_y() + bar.get_height() / 2,
-                    f"{pct:.1f}%", ha="right", va="center", fontsize=6,
-                    fontweight="bold", color="white")
-
-    # Mark "No Blue Coverage" for contractor
-    for i, s in enumerate(subnets):
-        if s == "contractor":
-            ax.annotate("No blue\ncoverage", xy=(pcts[i], i),
-                        xytext=(pcts[i] + 8, i + 0.3),
-                        fontsize=5, color=COLORS["accent1"],
-                        arrowprops=dict(arrowstyle="->", color=COLORS["accent1"],
-                                        lw=0.7))
-
-    # ── (b) Service reliability trajectory ──
+    # ── (b) Reliability trajectory ──
     ax = axes[0, 1]
-    trajectories = np.array(degrade_data["reliability_trajectories"])
-    mean_rel = np.mean(trajectories, axis=0)
-    std_rel = np.std(trajectories, axis=0)
-    steps = np.arange(len(mean_rel))
-
-    ax.plot(steps, mean_rel, color=COLORS["primary"], linewidth=1.0, label="Mean")
-    ax.fill_between(steps, mean_rel - std_rel, mean_rel + std_rel,
-                    alpha=0.15, color=COLORS["secondary"])
-
-    # Phase boundaries
+    traj = np.array(degrade_data["reliability_trajectories"])
+    mean_r = np.mean(traj, axis=0)
+    std_r = np.std(traj, axis=0)
+    steps = np.arange(len(mean_r))
+    ax.plot(steps, mean_r, color=C1, linewidth=0.8)
+    ax.fill_between(steps, mean_r - std_r, mean_r + std_r, alpha=0.12, color=CGRAY)
     for ps in [PHASE_1_START, PHASE_2_START]:
-        ax.axvline(ps, color=COLORS["accent1"], linestyle="--", linewidth=0.6, alpha=0.5)
-
+        ax.axvline(ps, color=CGRAY, linestyle="--", linewidth=0.4)
     ax.set_xlabel("Step")
-    ax.set_ylabel("Mean Service Reliability (%)")
-    ax.set_title("(b) Reliability Degradation Over Time")
-    ax.set_ylim(bottom=max(0, mean_rel.min() - 10))
+    ax.set_ylabel("Reliability (%)")
+    ax.set_title("(b) Service reliability")
+    ax.set_ylim(bottom=max(0, mean_r.min() - 5))
 
     # ── (c) Timing gaps ──
     ax = axes[1, 0]
-    gaps_rd = degrade_data["gaps_root_to_degrade"]
-    gaps_rr = degrade_data["gaps_root_to_restore"]
+    gaps_rd = [g for g in degrade_data["gaps_root_to_degrade"] if g >= 0]
+    gaps_rr = [g for g in degrade_data["gaps_root_to_restore"] if g >= 0]
 
-    gap_data = []
-    gap_labels = []
-    gap_colors = []
-
+    gap_data, gap_labels = [], []
     if gaps_rd:
-        gap_data.append(gaps_rd)
-        gap_labels.append("Root →\nDegrade")
-        gap_colors.append(COLORS["accent1"])
+        gap_data.append(gaps_rd); gap_labels.append("Root\u2192Degrade")
     if gaps_rr:
-        gap_data.append(gaps_rr)
-        gap_labels.append("Root →\nRestore")
-        gap_colors.append(COLORS["accent2"])
+        gap_data.append(gaps_rr); gap_labels.append("Root\u2192Restore")
 
     if gap_data:
-        vp = ax.violinplot(gap_data, showmeans=True, showmedians=True)
-        for i, body in enumerate(vp["bodies"]):
-            body.set_facecolor(gap_colors[i])
-            body.set_alpha(0.6)
-        if "cmeans" in vp:
-            vp["cmeans"].set_color("black")
-        if "cmedians" in vp:
-            vp["cmedians"].set_color(COLORS["accent1"])
-            vp["cmedians"].set_linewidth(1.5)
-        ax.set_xticks(range(1, len(gap_data) + 1))
-        ax.set_xticklabels(gap_labels, fontsize=6)
+        bp = ax.boxplot(gap_data, patch_artist=True, widths=0.5,
+                        medianprops=dict(color="black", linewidth=0.8),
+                        whiskerprops=dict(linewidth=0.5),
+                        capprops=dict(linewidth=0.5),
+                        flierprops=dict(marker=".", markersize=1.5,
+                                        markerfacecolor=CGRAY, markeredgecolor="none"))
+        bcolors = [C1, C3]
+        bhatches = ["", "//"]
+        for patch, c, h in zip(bp["boxes"], bcolors[:len(gap_data)],
+                               bhatches[:len(gap_data)]):
+            patch.set_facecolor(c)
+            patch.set_edgecolor("black")
+            patch.set_linewidth(0.5)
+            patch.set_hatch(h)
+        ax.set_xticklabels(gap_labels, fontsize=5.5)
 
     ax.set_ylabel("Steps")
-    ax.set_title("(c) Attack-to-Response Timing Gaps")
-
-    # Add stats text
+    ax.set_title("(c) Timing gaps")
+    # Stats annotation
     if gaps_rd:
-        ax.text(0.98, 0.95,
-                f"Root→Degrade: μ={np.mean(gaps_rd):.1f}, med={np.median(gaps_rd):.0f}\n"
-                f"Root→Restore: μ={np.mean(gaps_rr):.1f}, med={np.median(gaps_rr):.0f}",
+        med_rd = np.median(gaps_rd)
+        med_rr = np.median(gaps_rr) if gaps_rr else 0
+        ax.text(0.97, 0.97,
+                f"med={med_rd:.0f}\nmed={med_rr:.0f}",
                 transform=ax.transAxes, fontsize=5, va="top", ha="right",
-                bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                          edgecolor=COLORS["lightgray"], alpha=0.9))
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                          edgecolor=CGRAY, linewidth=0.4))
 
-    # ── (d) Phase breakdown + restoration rate ──
+    # ── (d) Phase breakdown + restoration ──
     ax = axes[1, 1]
     phase_data = degrade_data["by_phase"]
-    phases = [0, 1, 2]
-    phase_counts = [phase_data.get(p, 0) for p in phases]
-    phase_names = ["Phase 0", "Phase 1", "Phase 2"]
-    colors_ph = [COLORS["secondary"], COLORS["accent1"], COLORS["accent3"]]
+    pc = [phase_data.get(str(p), phase_data.get(p, 0)) for p in [0, 1, 2]]
+    x_ph = np.arange(3)
+    bc_ph = [C1, C2, C3]
+    bh_ph = ["", "//", "\\\\"]
+    bars = ax.bar(x_ph, pc, color=bc_ph, edgecolor="black", linewidth=0.5, width=0.55)
+    for bar, h in zip(bars, bh_ph):
+        bar.set_hatch(h)
+    ax.set_xticks(x_ph)
+    ax.set_xticklabels(["Ph 0", "Ph 1", "Ph 2"], fontsize=6)
+    ax.set_ylabel("Events")
+    ax.set_title("(d) Phase & restoration")
+    # Restoration stat
+    nr = degrade_data["degraded_never_restored"]
+    td = degrade_data["total_degraded_hosts"]
+    pct_nr = nr / td * 100 if td else 0
+    ax.text(0.97, 0.97, f"Never restored:\n{nr}/{td} ({pct_nr:.0f}%)",
+            transform=ax.transAxes, fontsize=5, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
+                      edgecolor=CGRAY, linewidth=0.4))
 
-    ax2 = ax.twinx()
-
-    x = np.arange(3)
-    width = 0.35
-
-    bars1 = ax.bar(x - width / 2, phase_counts, width,
-                   color=colors_ph, edgecolor="black", linewidth=0.5,
-                   alpha=0.8, label="Degrade events")
-
-    # Restoration rate
-    never_restored = degrade_data["degraded_never_restored"]
-    total_degraded = degrade_data["total_degraded_hosts"]
-    restored_pct = ((total_degraded - never_restored) / total_degraded * 100
-                    if total_degraded > 0 else 0)
-    never_pct = 100 - restored_pct
-
-    # Show as annotation instead of second bar set
-    ax.text(0.02, 0.95,
-            f"Degraded hosts: {total_degraded}\n"
-            f"Never restored: {never_restored} ({never_pct:.0f}%)\n"
-            f"Restored: {total_degraded - never_restored} ({restored_pct:.0f}%)",
-            transform=ax.transAxes, fontsize=6, va="top",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
-                      edgecolor=COLORS["lightgray"], alpha=0.9))
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(phase_names, fontsize=7)
-    ax.set_ylabel("Degradation Events")
-    ax.set_title("(d) Degradation by Phase & Restoration")
-    ax2.set_yticks([])
-
-    plt.tight_layout()
     if save:
-        fig.savefig(FIG_DIR / "fig4_degradation_analysis.pdf")
-        fig.savefig(FIG_DIR / "fig4_degradation_analysis.png")
-        print(f"  Saved fig4_degradation_analysis.pdf/png")
+        _safe_save(fig, "fig4_degradation_analysis")
     return fig
 
 
 def fig5_robustness(plt, cross_seed_data, baseline_data, save=True):
-    """Figure 5: 1x2 — Robustness and statistical validation.
-
-    (a) Cross-seed reward distributions
-    (b) Episode reward histogram with fitted normal
-    """
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 2.8))
+    """Figure 5 (1-column, 1x2): cross-seed robustness & reward distribution."""
+    fig, axes = plt.subplots(1, 2, figsize=(COL_W, 1.65),
+                             gridspec_kw={"wspace": 0.4})
 
     # ── (a) Cross-seed comparison ──
     ax = axes[0]
@@ -760,76 +720,56 @@ def fig5_robustness(plt, cross_seed_data, baseline_data, save=True):
     seed_keys = sorted(seeds_data.keys(), key=int)
     data_list = [seeds_data[k] for k in seed_keys]
     seed_labels = [f"Seed {k}" for k in seed_keys]
-    colors_seeds = [COLORS["primary"], COLORS["secondary"], COLORS["accent2"]]
 
-    bp = ax.boxplot(data_list, patch_artist=True, widths=0.5,
-                    medianprops=dict(color="black", linewidth=1.5),
-                    flierprops=dict(marker="o", markersize=2, alpha=0.4))
-    for patch, c in zip(bp["boxes"], colors_seeds[:len(data_list)]):
+    bp = ax.boxplot(data_list, patch_artist=True, widths=0.45,
+                    medianprops=dict(color="black", linewidth=0.8),
+                    whiskerprops=dict(linewidth=0.5),
+                    capprops=dict(linewidth=0.5),
+                    flierprops=dict(marker=".", markersize=1.5,
+                                   markerfacecolor=CGRAY, markeredgecolor="none"))
+    bcolors = [C1, C3, C4]
+    bhatches = ["", "//", "\\\\"]
+    for patch, c, h in zip(bp["boxes"], bcolors[:len(data_list)],
+                           bhatches[:len(data_list)]):
         patch.set_facecolor(c)
-        patch.set_alpha(0.7)
-
-    # Add individual points (jittered)
-    for i, data in enumerate(data_list):
-        jitter = np.random.default_rng(42).normal(0, 0.06, len(data))
-        ax.scatter(np.full(len(data), i + 1) + jitter, data,
-                   s=6, alpha=0.3, color=colors_seeds[i % len(colors_seeds)],
-                   zorder=3, edgecolors="none")
-
-    ax.set_xticklabels(seed_labels, fontsize=7)
-    ax.set_ylabel("Episode Reward")
-    ax.set_title("(a) Cross-Seed Robustness")
-
-    # Add means
+        patch.set_edgecolor("black")
+        patch.set_linewidth(0.5)
+        patch.set_hatch(h)
+    ax.set_xticklabels(seed_labels, fontsize=5.5)
+    ax.set_ylabel("Episode reward")
+    ax.set_title("(a) Cross-seed robustness")
+    # Mean markers + labels
     for i, data in enumerate(data_list):
         m = np.mean(data)
-        ax.plot(i + 1, m, "D", color="white", markersize=5,
-                markeredgecolor="black", markeredgewidth=0.8, zorder=5)
-        ax.text(i + 1 + 0.3, m, f"μ={m:.0f}", fontsize=6, va="center")
+        ax.plot(i + 1, m, "D", markersize=3, color="white",
+                markeredgecolor="black", markeredgewidth=0.5, zorder=5)
 
-    # Cross-seed stats
-    all_means = [np.mean(d) for d in data_list]
-    ax.text(0.02, 0.02, f"Cross-seed σ = {np.std(all_means):.1f}",
-            transform=ax.transAxes, fontsize=6, va="bottom",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="lightyellow",
-                      edgecolor=COLORS["lightgray"]))
-
-    # ── (b) Reward distribution histogram ──
+    # ── (b) Reward distribution ──
     ax = axes[1]
     rewards = np.array(baseline_data["episode_rewards"])
-    n_bins = min(20, max(8, len(rewards) // 3))
-
-    ax.hist(rewards, bins=n_bins, density=True, alpha=0.7,
-            color=COLORS["primary"], edgecolor="black", linewidth=0.5,
-            label=f"V11a (n={len(rewards)})")
-
-    # Fit normal distribution
+    n_bins = min(15, max(6, len(rewards) // 4))
+    ax.hist(rewards, bins=n_bins, density=True, alpha=0.85,
+            color=C3, edgecolor="black", linewidth=0.4, hatch="//")
+    # Normal fit
     from scipy import stats as sp_stats
     mu, sigma = rewards.mean(), rewards.std()
     x_fit = np.linspace(rewards.min() - 50, rewards.max() + 50, 200)
-    pdf = sp_stats.norm.pdf(x_fit, mu, sigma)
-    ax.plot(x_fit, pdf, color=COLORS["accent1"], linewidth=1.2, linestyle="--",
-            label=f"Normal fit\nμ={mu:.0f}, σ={sigma:.0f}")
-
+    ax.plot(x_fit, sp_stats.norm.pdf(x_fit, mu, sigma),
+            color=C1, linewidth=0.9, linestyle="--", label="Normal fit")
+    ax.set_xlabel("Episode reward")
+    ax.set_ylabel("Density")
+    ax.set_title("(b) Reward distribution")
     # Shapiro-Wilk test
     if len(rewards) <= 5000:
         w_stat, w_p = sp_stats.shapiro(rewards)
-        ax.text(0.02, 0.95,
-                f"Shapiro-Wilk: W={w_stat:.3f}, p={w_p:.3f}",
-                transform=ax.transAxes, fontsize=5, va="top",
+        ax.text(0.97, 0.95,
+                f"W={w_stat:.2f}\np={w_p:.2f}",
+                transform=ax.transAxes, fontsize=5, va="top", ha="right",
                 bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
-                          edgecolor=COLORS["lightgray"]))
-
-    ax.set_xlabel("Episode Reward")
-    ax.set_ylabel("Density")
-    ax.set_title("(b) Reward Distribution")
-    ax.legend(loc="upper left", fontsize=6, framealpha=0.8)
-
-    plt.tight_layout()
+                          edgecolor=CGRAY, linewidth=0.4, alpha=0.95))
+    ax.legend(fontsize=5, framealpha=0.9, loc="upper left")
     if save:
-        fig.savefig(FIG_DIR / "fig5_robustness.pdf")
-        fig.savefig(FIG_DIR / "fig5_robustness.png")
-        print(f"  Saved fig5_robustness.pdf/png")
+        _safe_save(fig, "fig5_robustness")
     return fig
 
 

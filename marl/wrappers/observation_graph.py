@@ -51,7 +51,7 @@ class NodeTracker:
 
     def pop(self, node_str):
         nid = self.mapping.get(node_str, None)
-        if nid:
+        if nid is not None:
             self.mapping.pop(node_str)
             self.inv_mapping.pop(nid)
 
@@ -494,7 +494,7 @@ class ObservationGraph:
         elif isinstance(act, Remove) and success == TernaryEnum.TRUE:
             # Removes all suspicious sessions from act.hostname
             if act.hostname in self.host_to_sussy:
-                sus_ids = self.host_to_sussy.pop()
+                sus_ids = self.host_to_sussy.pop(act.hostname)
             else:
                 sus_ids = []
 
@@ -590,7 +590,10 @@ class ObservationGraph:
 
                     # Seems like this only happens if proc is suspicious?
                     if 'PID' in proc:
-                        self.host_to_sussy[host_id].append(port_id)
+                        if local_port:
+                            self.host_to_sussy[host_id].append(lp_id)
+                        if remote_port:
+                            self.host_to_sussy[host_id].append(rp_id)
 
 
             # Observation corresponding to 'Analyse'

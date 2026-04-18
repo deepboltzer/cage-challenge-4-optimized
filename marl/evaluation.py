@@ -57,7 +57,7 @@ def load_submission(source: str):
     return Submission
 
 
-def evaluate_one_episode(cyborg, wrapped_cyborg, agent, write_to_file, i,tot):
+def evaluate_one_episode(cyborg, wrapped_cyborg, agents_dict, write_to_file, i, tot):
     observations, _ = wrapped_cyborg.reset()
     r = []
     a = []
@@ -68,7 +68,7 @@ def evaluate_one_episode(cyborg, wrapped_cyborg, agent, write_to_file, i,tot):
             agent_name: agent.get_action(
                 observations[agent_name], wrapped_cyborg.action_space(agent_name)
             )
-            for agent_name, agent in submission.AGENTS.items()
+            for agent_name, agent in agents_dict.items()
             if agent_name in wrapped_cyborg.agents
         }
         observations, rew, term, trunc, info = wrapped_cyborg.step(actions)

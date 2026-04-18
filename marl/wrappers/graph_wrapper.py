@@ -29,6 +29,12 @@ from wrappers.globals import *
 
 class GraphWrapper(EnterpriseMAE):
     def __init__(self, env: CybORG, *args, **kwargs):
+        # Force padded obs so each subnet block has a fixed SN_BLOCK_SIZE=59
+        # (9 subnet-id + 9 blocked + 9 comms + 16 compromised + 16 scanned).
+        # Without pad_spaces=True, BlueFlatWrapper returns variable-length obs per
+        # scenario (actual host counts), which breaks the hardcoded block-size
+        # indexing in _parse_tabular.
+        kwargs.setdefault('pad_spaces', True)
         super().__init__(env, *args, **kwargs)
 
         self.graphs = dict()
@@ -268,7 +274,13 @@ class GraphWrapper(EnterpriseMAE):
 
             # Pull out edges between subnets
             sn = block[:18]
-            me = ROUTERS[ sn[:9].nonzero()[0][0] ]
+            # pad_spaces=True pads short-agent obs to the long (agent_4) layout
+            # with trailing zeros. Zero-padded blocks have no one-hot subnet id;
+            # skip them so we only process real subnet blocks.
+            nz = sn[:9].nonzero()[0]
+            if len(nz) == 0:
+                continue
+            me = ROUTERS[ nz[0] ]
             can_maybe_connect_to = (sn[9:18] == 0).nonzero()[0]
 
             # Logic for subnet routing 

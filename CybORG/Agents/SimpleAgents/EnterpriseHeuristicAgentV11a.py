@@ -188,7 +188,7 @@ class EnterpriseHeuristicAgentV11a:
         )
         expected_base_len = 1 + base_subnet_len + NUM_MSG_BITS
         has_malfile = (n_malfile_hosts > 0 and
-                       len(obs) == expected_base_len + n_malfile_hosts)
+                       len(obs) >= expected_base_len + n_malfile_hosts)
         malfile_start = expected_base_len if has_malfile else len(obs)
 
         # -- Parse per-subnet obs --------------------------------------------

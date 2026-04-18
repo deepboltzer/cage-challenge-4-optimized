@@ -261,7 +261,8 @@ if __name__ == '__main__':
     #       1 bit if message was sent successfully 
     #
     # All handled in wrapper.graph_wrapper
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # NOTE: do NOT re-derive `device` here — it overrides the MPS/CUDA/CPU
+    # selection at the top of this file. Reuse the module-level `device`.
 
     agents = [InductiveGraphPPOAgent(
         ObservationGraph.DIM + 6,

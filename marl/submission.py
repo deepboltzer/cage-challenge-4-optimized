@@ -28,6 +28,13 @@ except ImportError:
 from models.cage4 import load
 from wrappers.graph_wrapper import GraphWrapper
 
+# Checkpoint prefix is configurable via KEEP_RUN env var; defaults to the
+# debug run shipped in marl/checkpoints/. Point at a trained-run prefix
+# for real evaluation (e.g. KEEP_RUN=my_run).
+_CKPT_DIR = os.path.join(os.path.dirname(__file__), 'checkpoints')
+_CKPT_PREFIX = os.environ.get('KEEP_RUN', 'test_cpu')
+
+
 class Submission:
 
     # Submission name
@@ -39,9 +46,8 @@ class Submission:
     # What is the name of the technique used? (e.g. Masked PPO)
     TECHNIQUE: str = "Graph-based PPO With Intra-agent Communication"
 
-    # Use this function to define your agents.
     AGENTS = {
-        f"blue_agent_{i}": load(f'{os.path.dirname(__file__)}/weights/contractor_active/gnn_ppo-{i}.pt')
+        f"blue_agent_{i}": load(os.path.join(_CKPT_DIR, f'{_CKPT_PREFIX}-{i}_checkpoint.pt'))
         for i in range(5)
     }
 

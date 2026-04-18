@@ -250,13 +250,6 @@ class InductiveCriticNetwork(nn.Module):
 
         self.conv1 = GCNConv(in_dim, hidden1)
         self.conv2 = GCNConv(hidden1, hidden2)
-        self.out = nn.Sequential(
-            nn.Linear(hidden2, hidden1),
-            nn.ReLU(),
-            nn.Linear(hidden1, hidden1),
-            nn.ReLU(),
-            nn.Linear(hidden1, 1)
-        )
 
         self.gs = nn.Linear(
             global_state_space, gdim
@@ -545,9 +538,9 @@ class InductiveGraphPPOAgent():
 
 def load(in_f):
     '''
-    Loads model checkpoint file 
+    Loads model checkpoint file
     '''
-    data = torch.load(in_f)
+    data = torch.load(in_f, map_location='cpu', weights_only=False)
     args,kwargs = data['agent']
 
     agent = InductiveGraphPPOAgent(*args, **kwargs)
