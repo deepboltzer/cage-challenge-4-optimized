@@ -45,9 +45,12 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 SEED = 1337
+# Workers are loky subprocesses doing CUDA inference on the same GPU.
+# 25 replicas × 5 agents saturates a 12 GB card; 8 fits comfortably on a 3080 Ti.
+# If you move to a 24 GB+ GPU (or switch to CPU rollouts) you can bump this back up.
 HYPER_PARAMS = SimpleNamespace(
-    N = 25,             # How many episodes before training
-    workers = 25,       # How many envs can run in parallel
+    N = 8,              # How many episodes before training
+    workers = 8,        # How many envs can run in parallel
     bs = 2500,          # How many steps to learn from at a time
     episode_len = 500,
     training_episodes = 500_000, # Realistically, stops improving around 50k
