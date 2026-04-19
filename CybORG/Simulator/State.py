@@ -439,10 +439,17 @@ class State(CybORGLogger):
             service = False
         if session is None:
             return
-        host.sessions[agent].remove(session)
-        session = self.sessions[agent].pop(session)
+        # Defensive: the pid->session index can outlive host.sessions entries
+        # when Restore / reboot / a prior Remove this step wiped them. Skip
+        # rather than raise ValueError from list.remove.
+        host_agent_sessions = host.sessions.get(agent, [])
+        if session in host_agent_sessions:
+            host_agent_sessions.remove(session)
+        session = self.sessions[agent].pop(session, None)
         # P4-G: session removed; invalidate index.
         self._pid_index_dirty = True
+        if session is None:
+            return
         if service:
             self.add_session(session)
 

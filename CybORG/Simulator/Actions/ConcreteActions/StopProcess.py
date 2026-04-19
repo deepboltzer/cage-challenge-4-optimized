@@ -41,11 +41,19 @@ class StopProcess(TargetedLocalAction):
             host.processes.append(process)
             service.process = pid
         if session_id is None: return
-        host.sessions[agent].remove(session_id)
-        session = state.sessions[agent].pop(session_id)
-        state.sessions_count[agent] -= 1
-        # Invalidate the pid->session index: this session is gone and the cache is now stale.
+        # Defensive: pid->session index can point to a session_id that was
+        # already scrubbed from host.sessions via a prior Remove/Restore this
+        # step (sus_pids accumulates duplicates across steps). Guard the
+        # list.remove / dict.pop rather than raise ValueError.
+        host_agent_sessions = host.sessions.get(agent, [])
+        if session_id in host_agent_sessions:
+            host_agent_sessions.remove(session_id)
+        session = state.sessions[agent].pop(session_id, None)
+        # Invalidate the pid->session index: session/process layout changed.
         state._pid_index_dirty = True
+        if session is None:
+            return
+        state.sessions_count[agent] -= 1
         if not service: return
         session = type(session)(
             hostname=host.hostname,

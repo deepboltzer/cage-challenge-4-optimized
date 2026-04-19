@@ -31,11 +31,19 @@ class RemoveOtherSessions_Parent(LocalAction):
                         obs.set_success(True)
             host = state.hosts[hostname]
             for sus_pid in sus_pids:
-                process = [proc for proc in host.processes if proc.pid == sus_pid][0]
+                matching_proc = [proc for proc in host.processes if proc.pid == sus_pid]
+                if not matching_proc:
+                    continue
+                process = matching_proc[0]
                 agent, session = state.get_session_from_pid(hostname, pid=sus_pid)
+                if agent is None or session is None:
+                    continue
                 host.processes.remove(process)
-                host.sessions[agent].remove(session)
-                state.sessions[agent].pop(session)
+                host_agent_sessions = host.sessions.get(agent, [])
+                if session in host_agent_sessions:
+                    host_agent_sessions.remove(session)
+                state.sessions[agent].pop(session, None)
+                state._pid_index_dirty = True
         return obs
 
     def __str__(self):
