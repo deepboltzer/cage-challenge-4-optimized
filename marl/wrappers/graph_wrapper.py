@@ -175,7 +175,7 @@ class GraphWrapper(EnterpriseMAE):
 
         self.ts += 1
         self.last_obs = graph_obs
-        return graph_obs, reward, term, trunc, info
+        return graph_obs, reward, term, trunc, info, action, observation
 
     def reset(self):
         '''
@@ -451,4 +451,24 @@ class GraphWrapper(EnterpriseMAE):
             torch.cat(srv), torch.tensor(n_srv),
             torch.cat(usr), torch.tensor(n_usr),
             torch.cat(edges, dim=1), True
+        )
+    
+    def malfile_obs_change(self, agent_name: str, observation) -> np.ndarray:
+        """Build the standard obs then append one malfile bit per host."""
+        base_obs = observation
+        state = self.env.environment_controller.state
+
+        malfile_flags: list[float] = []
+        for sn in self.subnets(agent_name):
+            subnet_hosts = self._cached_subnet_hosts.get(sn, [])
+            for h in subnet_hosts:
+                malfile_flags.append(
+                    float(self._get_malfile(h)) if h in state.hosts else 0.0
+                )
+
+        if not malfile_flags:
+            return base_obs
+
+        return np.concatenate(
+            [base_obs, np.array(malfile_flags, dtype=np.float32)]
         )

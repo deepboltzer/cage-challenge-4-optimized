@@ -26,12 +26,19 @@ from tqdm import tqdm
 
 from CybORG import CybORG
 from CybORG.Agents import SleepAgent, EnterpriseGreenAgent, FiniteStateRedAgent
+from CybORG.Agents.SimpleAgents.EnterpriseHeuristicAgentV11a import make_heuristic_agents_v11a
 from src.envs.fast_scenario import FastEnterpriseScenarioGenerator
 
-from models.cage4 import InductiveGraphPPOAgent
-from models.memory_buffer import MultiPPOMemory
+from models.cage4_constraint import InductiveGraphPPOAgent
+from models.memory_buffer_constraint import MultiPPOMemory
+### wrap the graph wrapper in the heuristic wrapper
 from wrappers.graph_wrapper import GraphWrapper
 from wrappers.observation_graph import ObservationGraph
+## possibley rework the rewarder for GNN output
+from models.helpers.Heursitic_rewarder import EnterpriseHeuristicRewarder
+
+
+
 
 device = torch.device(
     "mps" if torch.backends.mps.is_available() else
@@ -49,12 +56,13 @@ SEED = 1337
 # 25 replicas × 5 agents saturates a 12 GB card; 8 fits comfortably on a 3080 Ti.
 # If you move to a 24 GB+ GPU (or switch to CPU rollouts) you can bump this back up.
 HYPER_PARAMS = SimpleNamespace(
-    N = 8,              # How many episodes before training
-    workers = 8,        # How many envs can run in parallel
+    N = 25,            # How many episodes before training
+    workers = 25,       # How many envs can run in parallel
     bs = 2500,          # How many steps to learn from at a time
     episode_len = 500,
     training_episodes = 500_000, # Realistically, stops improving around 50k
-    epochs = 4
+    epochs = 4,
+    h_weights = [2.0, 1.0, 1, 0.0]  # Weights for heuristic reward components
 )
 
 N_AGENTS = 5
@@ -75,7 +83,7 @@ Returns:
     Tuple[List, float]: Per-agent PPO memories and total episode reward
 """
 @torch.no_grad()
-def generate_episode_job(agents, env, hp, i):
+def generate_episode_job(agents, env, hp, i, heuristic=False, h_weights = [2.0, 1.0, 1, 0.0]):
     '''
     Per-process job to generate one episode of memories
     for all 5 agents. Returns `N_AGENTS` memory buffers, 
@@ -86,15 +94,28 @@ def generate_episode_job(agents, env, hp, i):
         env:        wrapped cyborg object 
         hp:         hyperparameter namespace 
         i:          process id in range(0, `hp.workers`)
+        heuristic:   whether to use heuristic reward or env reward
+        h_weights:   list of weights for heuristic reward components
     '''
     torch.set_num_threads(max(1, MAX_THREADS // hp.workers))
 
+    # Initialize heuristic agents and rewarder
+    h_agents = make_heuristic_agents_v11a(env)
+
     # Initialize environment
     env.reset()
+    subnet_hosts = getattr(env, "_cached_subnet_hosts", {})
+    for name, ag in h_agents.items():
+        ag.reset()
+        ag.set_action_info(env.action_labels(name), env.action_mask(name), subnet_hosts)
     states = env.last_obs
+
+    h_rewarder = EnterpriseHeuristicRewarder(h_agents=h_agents, env=env, weights=h_weights[:-1])
+
     blocked_rewards = [0]*N_AGENTS
 
     tot_reward = 0
+    h_tot_reward = 0
     memory_buffers = MultiPPOMemory(hp.bs)
 
     # Begin episode 
@@ -112,31 +133,43 @@ def generate_episode_job(agents, env, hp, i):
             if blocked:
                 actions[k] = None
             else:
-                action,value,prob = agents[i].get_action((state,blocked))
-                memories[i] = (state,action,value,prob)
-                actions[k] = action
+                if heuristic:
+                    action, value, prob, h_value = agents[i].get_action_h((state,blocked))
+                    memories[i] = (state,action,value,prob, h_value)
+                    actions[k] = action
+                else:
+                    action,value,prob, h_value = agents[i].get_action((state,blocked))
+                    memories[i] = (state,action,value,prob, h_value)
+                    actions[k] = action
 
-        next_state, rewards, _,_,_ ,_,_= env.step(actions)
+        next_state, rewards, _,_,_, last_actions, obs = env.step(actions)
+        # get heuristic rewards
+        h_rewards = h_rewarder.get_reward(obs, last_actions)
+        h_rewards = [rewards[f"blue_agent_{i}"] * h_weights[-1] + h_rewards[i] for i in range(N_AGENTS)]
+        h_rewards = {f"blue_agent_{i}": h_rewards[i] for i in range(N_AGENTS)}
+
         rewards = list(rewards.values())
+        h_rewards = list(h_rewards.values())
         tot_reward += sum(rewards)/N_AGENTS
+        h_tot_reward += sum(h_rewards)/N_AGENTS
 
         # Delay recieving rewards until multi-step actions are completed. 
         # Agents recieve cumulative reward for all the timesteps 
         # they spent performing their action. 
         for i in range(N_AGENTS):
             if i in memories:
-                s,a,v,p = memories[i]
+                s,a,v,p,h_v = memories[i]
                 r = rewards[i] + blocked_rewards[i]
+                h_r = h_rewards[i] + blocked_rewards[i]
                 t = 0 if ts < hp.episode_len-1 else 1
 
-                memory_buffers.remember(i, s,a,v,p, r,t)
+                memory_buffers.remember(i, s,a,v,p, r,t, h_r,h_v)
                 blocked_rewards[i] = 0
             else:
                 blocked_rewards[i] += rewards[i]
 
         states = next_state
-
-    return memory_buffers.mems, tot_reward
+    return memory_buffers.mems, tot_reward, h_tot_reward
 
 
     """
@@ -149,8 +182,9 @@ def generate_episode_job(agents, env, hp, i):
         agents (List): List of GNN-PPO agent instances
         hp (SimpleNamespace): Hyperparameter container
         seed (int): RNG seed for reproducibility
+        alpha (float): Lagrangian multiplier for constraint mixing coefficient
     """
-def train(agents, hp, seed=SEED):
+def train(agents, hp, seed=SEED, alpha=1):
     [agent.train() for agent in agents]
     log = []
 
@@ -165,7 +199,7 @@ def train(agents, hp, seed=SEED):
             pool_size=4,
         )
         env = CybORG(sg, "sim", seed=seed)
-        envs.append(GraphWrapper(env))
+        envs.append(GraphWrapper(env, Training =True))
 
     # Define learn function for threads to call later so we can 
     # parallelize the backprop step. Use more threads for Agent 4 
@@ -182,36 +216,50 @@ def train(agents, hp, seed=SEED):
     for e in range(hp.training_episodes // hp.N):
         e *= hp.N
 
-        # Generate N episodes in parallel 
+        # Generate N//2 episodes in parallel on GNN policy
         out = Parallel(backend='loky', n_jobs=hp.workers)(
-            delayed(generate_episode_job)(agents, envs[i % len(envs)], hp, i) for i in range(hp.N)
+            delayed(generate_episode_job)(agents, envs[i % len(envs)], hp, i, heuristic=False, h_weights=hp.h_weights) for i in range(0, hp.N//2)
+        )
+        #Generate N//2 episodes in parallel on heuristic policy
+        out_h = Parallel(prefer='processes', n_jobs=hp.workers)(
+            delayed(generate_episode_job)(agents, envs[i % len(envs)], hp, i, heuristic=True, h_weights=hp.h_weights) for i in range(hp.N//2, hp.N)
         )
 
         # Concat memories across episodes, and transfer them to agents' 
         # internal memory buffers 
-        memories, avg_rewards = zip(*out)
+        memories, avg_rewards, _ = zip(*out)
+        h_memories, _, h_avg_rewards = zip(*out_h)
 
         # transpose: per-agent list of per-episode memory objects
         per_agent_mems = [list(m) for m in zip(*memories)]
+        per_agent_h_mems = [list(m) for m in zip(*h_memories)]
 
         for i in range(N_AGENTS):
             agents[i].memory.mems = per_agent_mems[i]
+            agents[i].h_memory.mems = per_agent_h_mems[i]
             # tell MultiPPOMemory how many sub-mems it has now
             agents[i].memory.agents = len(per_agent_mems[i])
+            agents[i].h_memory.agents = len(per_agent_h_mems[i])
 
         # Use threads because agents are in heap memory
         # Parallel backpropagation 
         print("Updating")
-        last_losses = Parallel(prefer='threads', n_jobs=N_AGENTS)(
+        total_losses = Parallel(prefer='threads', n_jobs=N_AGENTS)(
             delayed(learn)(i) for i in range(N_AGENTS)
         )
+        last_losses, h_last_losses = zip(*total_losses)
 
         losses = ','.join([f'{last_losses[i]:0.4f}' for i in range(N_AGENTS)])
+        h_losses = ','.join([f'{h_last_losses[i]:0.4f}' for i in range(N_AGENTS)])
+        
         print(f"[{e}] Loss: [{losses}]")
+        print(f"[{e}] Heuristic Loss: [{h_losses}]")
 
         # Log average reward across all episodes 
-        avg_reward = sum(avg_rewards) / hp.N
+        avg_reward = sum(avg_rewards) / (hp.N//2)
+        h_avg_rewards = sum(h_avg_rewards) / (hp.N //2)
         print(f"Avg reward for episode: {avg_reward}")
+        print(f"Avg heuristic reward for episode: {h_avg_rewards}")
         log.append((avg_reward,e,sum(last_losses)/N_AGENTS))
         torch.save(log, f'logs/{hp.fnames}.pt')
 
@@ -220,7 +268,7 @@ def train(agents, hp, seed=SEED):
             agent = agents[i]
             agent.save(outf=f'checkpoints/{hp.fnames}-{i}_checkpoint.pt')
 
-            if e % 10_000 < hp.N and e > hp.N:
+            if e % 3_000 < hp.N and e > hp.N:
                 agent.save(outf=f'checkpoints/{hp.fnames}-{i}_{e//1000}k.pt')
 
 
@@ -233,6 +281,7 @@ if __name__ == '__main__':
     ap.add_argument("--phase_reward_mode", default="default",
                     choices=["default", "contractor_off", "red_only"])
     ap.add_argument("--reward_blue", action="store_true")
+    ap.add_argument("--h_weights", nargs=4, type=float, default=[10.0, 5.0, 1, 1.0], help="Weights for heuristic reward components: [SimilarAction, DifferentAction, NotIdentical, OriginalReward]")
     args = ap.parse_args()
     print(args)
 
@@ -264,6 +313,7 @@ if __name__ == '__main__':
     #       1 bit if message was sent successfully 
     #
     # All handled in wrapper.graph_wrapper
+    # All handled in wrapper.graph_wrapper
     # NOTE: do NOT re-derive `device` here — it overrides the MPS/CUDA/CPU
     # selection at the top of this file. Reuse the module-level `device`.
 
@@ -278,4 +328,5 @@ if __name__ == '__main__':
     ) for _ in range(N_AGENTS)]
 
     HYPER_PARAMS.fnames = args.fname
+    HYPER_PARAMS.h_weights = args.h_weights
     train(agents, HYPER_PARAMS)
