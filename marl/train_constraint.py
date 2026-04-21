@@ -29,8 +29,10 @@ from CybORG.Agents import SleepAgent, EnterpriseGreenAgent, FiniteStateRedAgent
 from CybORG.Agents.SimpleAgents.EnterpriseHeuristicAgentV11a import make_heuristic_agents_v11a
 from src.envs.fast_scenario import FastEnterpriseScenarioGenerator
 
-from models.cage4_constraint import InductiveGraphPPOAgent
-from models.memory_buffer_constraint import MultiPPOMemory
+from models.cage4_constraint import InductiveGraphPPOAgent as Constraint_InductiveGraphPPOAgent
+from models.memory_buffer_constraint import MultiPPOMemory as Constraint_MultiPPOMemory
+from models.cage4 import InductiveGraphPPOAgent 
+from models.memory_buffer import MultiPPOMemory
 ### wrap the graph wrapper in the heuristic wrapper
 from wrappers.graph_wrapper import GraphWrapper
 from wrappers.observation_graph import ObservationGraph
@@ -62,7 +64,7 @@ HYPER_PARAMS = SimpleNamespace(
     episode_len = 500,
     training_episodes = 500_000, # Realistically, stops improving around 50k
     epochs = 4,
-    h_weights = [2.0, 1.0, 1, 0.0]  # Weights for heuristic reward components
+    h_weights = [1.0, 1.0, 1, 0.0]  # Weights for heuristic reward components
 )
 
 N_AGENTS = 5
@@ -83,7 +85,7 @@ Returns:
     Tuple[List, float]: Per-agent PPO memories and total episode reward
 """
 @torch.no_grad()
-def generate_episode_job(agents, env, hp, i, heuristic=False, h_weights = [2.0, 1.0, 1, 0.0]):
+def generate_episode_job(agents, env, hp, i, heuristic=False, h_weights = [2.0, 1.0, 1, 0.0], heuristic_mode="off"):
     '''
     Per-process job to generate one episode of memories
     for all 5 agents. Returns `N_AGENTS` memory buffers, 
@@ -96,6 +98,7 @@ def generate_episode_job(agents, env, hp, i, heuristic=False, h_weights = [2.0, 
         i:          process id in range(0, `hp.workers`)
         heuristic:   whether to use heuristic reward or env reward
         h_weights:   list of weights for heuristic reward components
+        heuristic_mode: mode for heuristic reward ("off", "heuristic", "mixed")
     '''
     torch.set_num_threads(max(1, MAX_THREADS // hp.workers))
 
@@ -116,7 +119,12 @@ def generate_episode_job(agents, env, hp, i, heuristic=False, h_weights = [2.0, 
 
     tot_reward = 0
     h_tot_reward = 0
-    memory_buffers = MultiPPOMemory(hp.bs)
+    if heuristic_mode == "off":
+        memory_buffers = Constraint_MultiPPOMemory(hp.bs)
+    else:
+        memory_buffers = MultiPPOMemory(hp.bs)
+        if heuristic_mode == "heuristic":
+            h_weights[-1] = 0.0  # zero out env reward if purely heuristic training
 
     # Begin episode 
     for ts in tqdm(
@@ -138,8 +146,12 @@ def generate_episode_job(agents, env, hp, i, heuristic=False, h_weights = [2.0, 
                     memories[i] = (state,action,value,prob, h_value)
                     actions[k] = action
                 else:
-                    action,value,prob, h_value = agents[i].get_action((state,blocked))
-                    memories[i] = (state,action,value,prob, h_value)
+                    if heuristic_mode == "off":
+                        action,value,prob, h_value = agents[i].get_action((state,blocked))
+                        memories[i] = (state,action,value,prob, h_value)
+                    else:
+                        action,value,prob = agents[i].get_action((state,blocked))
+                        memories[i] = (state,action,value,prob)
                     actions[k] = action
 
         next_state, rewards, _,_,_, last_actions, obs = env.step(actions)
@@ -158,18 +170,30 @@ def generate_episode_job(agents, env, hp, i, heuristic=False, h_weights = [2.0, 
         # they spent performing their action. 
         for i in range(N_AGENTS):
             if i in memories:
-                s,a,v,p,h_v = memories[i]
-                r = rewards[i] + blocked_rewards[i]
-                h_r = h_rewards[i] + blocked_rewards[i]
-                t = 0 if ts < hp.episode_len-1 else 1
+                if heuristic_mode == "off":
+                    s,a,v,p,h_v = memories[i]
+                    r = rewards[i] + blocked_rewards[i]
+                    h_r = h_rewards[i] + blocked_rewards[i]
+                    t = 0 if ts < hp.episode_len-1 else 1
 
-                memory_buffers.remember(i, s,a,v,p, r,t, h_r,h_v)
-                blocked_rewards[i] = 0
+                    memory_buffers.remember(i, s,a,v,p, r,t, h_r,h_v)
+                    blocked_rewards[i] = 0
+                else:
+                    s,a,v,p = memories[i]
+                    r = rewards[i] + blocked_rewards[i]
+                    t = 0 if ts < hp.episode_len-1 else 1
+
+                    memory_buffers.remember(i, s,a,v,p, r,t)
+                    blocked_rewards[i] = 0
             else:
                 blocked_rewards[i] += rewards[i]
 
         states = next_state
-    return memory_buffers.mems, tot_reward, h_tot_reward
+
+    if heuristic_mode == "off":
+        return memory_buffers.mems, tot_reward, h_tot_reward
+    else:
+        return memory_buffers.mems, tot_reward
 
 
     """
@@ -221,7 +245,7 @@ def train(agents, hp, seed=SEED, alpha=1):
             delayed(generate_episode_job)(agents, envs[i % len(envs)], hp, i, heuristic=False, h_weights=hp.h_weights) for i in range(0, hp.N//2)
         )
         #Generate N//2 episodes in parallel on heuristic policy
-        out_h = Parallel(prefer='processes', n_jobs=hp.workers)(
+        out_h = Parallel(backend='loky', n_jobs=hp.workers)(
             delayed(generate_episode_job)(agents, envs[i % len(envs)], hp, i, heuristic=True, h_weights=hp.h_weights) for i in range(hp.N//2, hp.N)
         )
 
@@ -271,6 +295,79 @@ def train(agents, hp, seed=SEED, alpha=1):
             if e % 3_000 < hp.N and e > hp.N:
                 agent.save(outf=f'checkpoints/{hp.fnames}-{i}_{e//1000}k.pt')
 
+def train_on_heuristic(agents, hp, seed=SEED):
+    [agent.train() for agent in agents]
+    log = []
+
+    # Only call constructors once out here to save some time
+    envs = []
+    for i in range(min(hp.workers, hp.N)):
+        sg = FastEnterpriseScenarioGenerator(
+            blue_agent_class=SleepAgent,
+            green_agent_class=EnterpriseGreenAgent,
+            red_agent_class=FiniteStateRedAgent,
+            steps=hp.episode_len,
+            pool_size=4,
+        )
+        env = CybORG(sg, "sim", seed=seed)
+        envs.append(GraphWrapper(env, Training =True))
+
+    # Define learn function for threads to call later so we can 
+    # parallelize the backprop step. Use more threads for Agent 4 
+    # because they're managing 3 subnets instead of 1 (bigger graph/matrices)
+    # Still not perfectly load-balanced, but close enough
+    def learn(i):
+            if i < 4:
+                torch.set_num_threads(max(1, MAX_THREADS // 9))
+            else:
+                torch.set_num_threads(max(1, (MAX_THREADS // 9) * N_AGENTS))
+            return agents[i].learn()
+
+    # Begin training loop 
+    for e in range(hp.training_episodes // hp.N):
+        e *= hp.N
+
+        #Generate N episodes in parallel on heuristic policy
+        out = Parallel(backend='loky', n_jobs=hp.workers)(
+            delayed(generate_episode_job)(agents, envs[i % len(envs)], hp, i, heuristic=False, h_weights=hp.h_weights, heuristic_mode="heuristic") for i in range(0, hp.N)
+        )
+
+        # Concat memories across episodes, and transfer them to agents' 
+        # internal memory buffers 
+        memories, avg_rewards = zip(*out)
+
+        # transpose: per-agent list of per-episode memory objects
+        per_agent_mems = [list(m) for m in zip(*memories)]
+
+        for i in range(N_AGENTS):
+            agents[i].memory.mems = per_agent_mems[i]
+            # tell MultiPPOMemory how many sub-mems it has now
+            agents[i].memory.agents = len(per_agent_mems[i])
+
+        # Use threads because agents are in heap memory
+        # Parallel backpropagation 
+        print("Updating")
+        total_losses = Parallel(prefer='threads', n_jobs=N_AGENTS)(
+            delayed(learn)(i) for i in range(N_AGENTS)
+        )
+
+        losses = ','.join([f'{total_losses[i]:0.4f}' for i in range(N_AGENTS)])
+        
+        print(f"[{e}] Loss: [{losses}]")
+
+        # Log average reward across all episodes 
+        avg_reward = sum(avg_rewards) / (hp.N)
+        print(f"Avg reward for episode: {avg_reward}")
+        log.append((avg_reward,e,sum(total_losses)/N_AGENTS))
+        torch.save(log, f'logs/{hp.fnames}.pt')
+
+        # Checkpoint model states 
+        for i in range(N_AGENTS):
+            agent = agents[i]
+            agent.save(outf=f'checkpoints/{hp.fnames}-{i}_checkpoint.pt')
+
+            if e % 2_000 < hp.N and e > hp.N:
+                agent.save(outf=f'checkpoints/{hp.fnames}-{i}_{e//1000}k.pt')
 
 if __name__ == '__main__':
     ap = ArgumentParser()
@@ -281,7 +378,9 @@ if __name__ == '__main__':
     ap.add_argument("--phase_reward_mode", default="default",
                     choices=["default", "contractor_off", "red_only"])
     ap.add_argument("--reward_blue", action="store_true")
-    ap.add_argument("--h_weights", nargs=4, type=float, default=[10.0, 5.0, 1, 1.0], help="Weights for heuristic reward components: [SimilarAction, DifferentAction, NotIdentical, OriginalReward]")
+    ap.add_argument("--h_weights", nargs=4, type=float, default=[1.0, 1.0, 0, 0.0], help="Weights for heuristic reward components: [SimilarAction, DifferentAction, NotIdentical, OriginalReward]")
+    ap.add_argument("--purely_heuristic_training", default="off",
+                choices=["off", "heuristic", "mixed"])
     args = ap.parse_args()
     print(args)
 
@@ -317,7 +416,7 @@ if __name__ == '__main__':
     # NOTE: do NOT re-derive `device` here — it overrides the MPS/CUDA/CPU
     # selection at the top of this file. Reuse the module-level `device`.
 
-    agents = [InductiveGraphPPOAgent(
+    agents = [Constraint_InductiveGraphPPOAgent(
         ObservationGraph.DIM + 6,
         bs=HYPER_PARAMS.bs,
         a_kwargs={'lr': 0.0003, 'hidden1': args.hidden, 'hidden2': args.embedding},
@@ -329,4 +428,29 @@ if __name__ == '__main__':
 
     HYPER_PARAMS.fnames = args.fname
     HYPER_PARAMS.h_weights = args.h_weights
-    train(agents, HYPER_PARAMS)
+    HYPER_PARAMS.purely_heuristic_training = args.purely_heuristic_training
+
+    if args.purely_heuristic_training == "heuristic":
+        print("Training purely on heuristic rewards")
+        agents = [InductiveGraphPPOAgent(
+        ObservationGraph.DIM + 6,
+        bs=HYPER_PARAMS.bs,
+        a_kwargs={'lr': 0.0003, 'hidden1': args.hidden, 'hidden2': args.embedding},
+        c_kwargs={'lr': 0.001, 'hidden1': args.hidden, 'hidden2': args.embedding},
+        clip=0.2,
+        epochs=HYPER_PARAMS.epochs,
+        device=device,  # <-- important
+    ) for _ in range(N_AGENTS)]
+        train_on_heuristic(agents, HYPER_PARAMS)
+    else:
+        print("Training constraint PPO")
+        agents = [Constraint_InductiveGraphPPOAgent(
+        ObservationGraph.DIM + 6,
+        bs=HYPER_PARAMS.bs,
+        a_kwargs={'lr': 0.0003, 'hidden1': args.hidden, 'hidden2': args.embedding},
+        c_kwargs={'lr': 0.001, 'hidden1': args.hidden, 'hidden2': args.embedding},
+        clip=0.2,
+        epochs=HYPER_PARAMS.epochs,
+        device=device,  # <-- important
+        ) for _ in range(N_AGENTS)]
+        train(agents, HYPER_PARAMS)

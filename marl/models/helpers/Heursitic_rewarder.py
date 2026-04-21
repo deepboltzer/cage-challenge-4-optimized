@@ -31,7 +31,7 @@ class HeuristicRewarder(BaseRewarder):
     
 
 class EnterpriseHeuristicRewarder(BaseRewarder):
-    def __init__(self, h_agents:list, env, weights: list = [5.0, 5.0]):
+    def __init__(self, h_agents:list, env, weights: list = [1.0, 1.0, 1]):
         super().__init__()
         self.h_agents = h_agents
         self.weights = weights
@@ -55,9 +55,11 @@ class EnterpriseHeuristicRewarder(BaseRewarder):
         
         rewards = [0] * len(self.h_agents)
 
+        #Rewards
         for name,agent in self.h_agents.items():
             idx = int(agent.agent_name.split("_")[-1])
             h_action = h_action_dict.get(name)
+            # Either needs to hit exacly same action or just same type
             if self.weights[-2] != 0:
                 if type(actions[name]) == type(h_action):
                     rewards[idx] = self.weights[0]
@@ -66,8 +68,6 @@ class EnterpriseHeuristicRewarder(BaseRewarder):
             else:
                 if actions[name] == h_action:
                     rewards[idx] = self.weights[0]
-                    print(f"same action for {name}: {actions[name]} == {h_action}")
-                    input("same action")
                 else:
                     rewards[idx] = -self.weights[1]
         return rewards
