@@ -381,6 +381,7 @@ if __name__ == '__main__':
     ap.add_argument("--h_weights", nargs=4, type=float, default=[1.0, 1.0, 0, 0.0], help="Weights for heuristic reward components: [SimilarAction, DifferentAction, NotIdentical, OriginalReward]")
     ap.add_argument("--purely_heuristic_training", default="off",
                 choices=["off", "heuristic", "mixed"])
+    ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"], help="Device to use for training")
     args = ap.parse_args()
     print(args)
 
@@ -415,7 +416,10 @@ if __name__ == '__main__':
     # All handled in wrapper.graph_wrapper
     # NOTE: do NOT re-derive `device` here — it overrides the MPS/CUDA/CPU
     # selection at the top of this file. Reuse the module-level `device`.
-
+    if args.device != "auto":
+        device = torch.device(args.device)
+        print(f"Overriding device selection. Using {device} for training.")
+        
     agents = [Constraint_InductiveGraphPPOAgent(
         ObservationGraph.DIM + 6,
         bs=HYPER_PARAMS.bs,
