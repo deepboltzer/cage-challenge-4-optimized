@@ -172,11 +172,17 @@ def patch_simulation_controller():
     SimulationController.step = traced_step
 
 
-def run_tracer(n_episodes: int = 10, seed: int = 42, max_steps: int = 500):
+def run_tracer(
+    n_episodes: int = 10,
+    seed: int = 42,
+    max_steps: int = 500,
+    db_path: str | None = None,
+):
     global _exec_trace
 
-    db_path = str(Path(__file__).parent.parent / "data" / "action_order_trace.db")
-    conn = create_db(db_path)
+    db_file = Path(db_path) if db_path else Path(__file__).parent.parent / "data" / "action_order_trace.db"
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    conn = create_db(str(db_file))
 
     patch_simulation_controller()
 
@@ -390,7 +396,7 @@ def run_tracer(n_episodes: int = 10, seed: int = 42, max_steps: int = 500):
     print(f"  4. Monitor is an end_turn_action, executed AFTER all agent actions.")
     print(f"  5. Reward is calculated AFTER all actions and Monitor execute.")
     print(f"\nElapsed: {elapsed:.1f}s")
-    print(f"Database: {db_path}")
+    print(f"Database: {db_file}")
 
     conn.close()
 
@@ -399,5 +405,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Action Order Tracer")
     parser.add_argument('--episodes', type=int, default=10)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--db-path', type=str, default=None)
     args = parser.parse_args()
-    run_tracer(n_episodes=args.episodes, seed=args.seed)
+    run_tracer(n_episodes=args.episodes, seed=args.seed, db_path=args.db_path)
