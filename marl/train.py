@@ -116,7 +116,7 @@ def generate_episode_job(agents, env, hp, i):
                 memories[i] = (state,action,value,prob)
                 actions[k] = action
 
-        next_state, rewards, _,_,_ = env.step(actions)
+        next_state, rewards, _,_,_ ,_,_= env.step(actions)
         rewards = list(rewards.values())
         tot_reward += sum(rewards)/N_AGENTS
 
@@ -233,6 +233,7 @@ if __name__ == '__main__':
     ap.add_argument("--phase_reward_mode", default="default",
                     choices=["default", "contractor_off", "red_only"])
     ap.add_argument("--reward_blue", action="store_true")
+    ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"], help="Device to use for training")
     args = ap.parse_args()
     print(args)
 
@@ -266,6 +267,9 @@ if __name__ == '__main__':
     # All handled in wrapper.graph_wrapper
     # NOTE: do NOT re-derive `device` here — it overrides the MPS/CUDA/CPU
     # selection at the top of this file. Reuse the module-level `device`.
+    if args.device != "auto":
+        device = torch.device(args.device)
+        print(f"Overriding device selection. Using {device} for training.")
 
     agents = [InductiveGraphPPOAgent(
         ObservationGraph.DIM + 6,
